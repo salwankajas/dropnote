@@ -12,8 +12,6 @@ __pycache__
 *.sqlite3-*
 *.db
 *.db-*
-dropnote-uploads
-uploads
 dist
 *.png
 *.jpg

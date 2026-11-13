@@ -103,7 +103,7 @@ function App() {
   const [videoInfo, setVideoInfo] = useState(null);
   const [videoInfoBusy, setVideoInfoBusy] = useState(false);
   const [videoInfoError, setVideoInfoError] = useState('');
-  const [newCampaign, setNewCampaign] = useState({ title: '', channel: '', video: '', resource: '', resourceFile: null, resourceFileName: '', resourceType: 'link', limit: '', ends: '', status: 'Live', description: 'A new creator resource campaign.', handle: '', category: 'New resource', accent: '#777B77', initials: '' });
+  const [newCampaign, setNewCampaign] = useState({ title: '', channel: '', video: '', resource: '', resourceType: 'link', limit: '', ends: '', status: 'Live', description: 'A new creator resource campaign.', handle: '', category: 'New resource', accent: '#777B77', initials: '' });
 
   useEffect(() => {
     const media = window.matchMedia?.('(prefers-color-scheme: dark)');
@@ -179,21 +179,25 @@ function App() {
       if (continueToVerify) setClaimStep(2);
     } catch { notify('Clipboard unavailable. Allow clipboard access, then try again.'); }
   };
-  const downloadResource = async () => {
-    if (!selected?.downloadToken) { notify('This download is unavailable. Verify your comment again to get a fresh link.'); return; }
-    try {
-      const response = await fetch(`/api/campaigns/${encodeURIComponent(selected.id)}/resource-file`, { headers: { 'X-Resource-Token': selected.downloadToken } });
-      if (!response.ok) { const result = await response.json().catch(() => ({})); throw new Error(result.detail || 'Could not download the resource.'); }
-      const blob = await response.blob(); const objectUrl = URL.createObjectURL(blob); const anchor = document.createElement('a');
-      anchor.href = objectUrl; anchor.download = selected.resourceFileName || 'dropnote-resource'; document.body.appendChild(anchor); anchor.click(); anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
-    } catch (error) { notify(error.message || 'Could not download the resource.'); }
+  const copyResourceLink = async () => {
+    try { await navigator.clipboard.writeText(selected?.resource || ''); notify('Resource link copied.'); }
+    catch { notify('Clipboard unavailable. Copy the link manually.'); }
+  };
+  const downloadResourceText = () => {
+    const text = selected?.resource || '';
+    if (!text) { notify('No resource text to save.'); return; }
+    const safeTitle = (selected?.title || 'dropnote-resource').replace(/[^\w\- ]+/g, '').trim().slice(0, 60) || 'dropnote-resource';
+    const objectUrl = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl; anchor.download = `${safeTitle}.txt`; document.body.appendChild(anchor); anchor.click(); anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    notify('Resource text saved on your device.');
   };
   const copyResourceText = async () => {
     try { await navigator.clipboard.writeText(selected?.resource || ''); notify('Resource text copied.'); }
     catch { notify('Clipboard unavailable. Select and copy the resource text manually.'); }
   };
-  const mapCampaign = r => ({ id: r.campaign_id, title: r.title, channel: r.channel, handle: r.handle === '@creator' ? '' : (r.handle || ''), category: r.category, accent: r.accent, claimed: r.claimed, limit: r.max_claims, ends: r.ends_at, status: r.status, description: r.description, video: r.video_url, initials: r.initials, resourceType: r.resource_type || 'link', resource: r.resource_type === 'text' ? r.resource_text : r.resource_type === 'file' ? (r.resource_file_id || '') : r.resource_url, resourceFileName: r.resource_file_name || '' });
+  const mapCampaign = r => ({ id: r.campaign_id, title: r.title, channel: r.channel, handle: r.handle === '@creator' ? '' : (r.handle || ''), category: r.category, accent: r.accent, claimed: r.claimed, limit: r.max_claims, ends: r.ends_at, status: r.status, description: r.description, video: r.video_url, initials: r.initials, resourceType: r.resource_type || 'link', resource: r.resource_type === 'text' ? r.resource_text : r.resource_url });
   const loadStudioCampaigns = async () => {
     const response = await fetch('/api/studio/campaigns');
     if (!response.ok) throw new Error('Could not load Studio campaigns. Please sign in again.');
@@ -265,7 +269,7 @@ function App() {
       const response = await fetch('/api/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ campaignId: selected.id, code: claimCode }) });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.detail || 'Could not verify the comment. Please try again.');
-      const unlocked = { resourceType: result.resourceType || 'link', resource: result.resourceType === 'text' ? result.resourceText : result.resourceType === 'file' ? '' : result.resourceUrl, downloadToken: result.downloadToken || '', resourceFileName: result.resourceFileName || '' };
+      const unlocked = { resourceType: result.resourceType || 'link', resource: result.resourceType === 'text' ? result.resourceText : result.resourceUrl };
       setSelected(current => ({ ...current, ...unlocked }));
       const nextUnlocked = { ...unlockedResources, [selected.id]: unlocked };
       setUnlockedResources(nextUnlocked);
@@ -286,43 +290,32 @@ function App() {
     } catch (error) { setVideoInfoError(error.message || 'Could not fetch YouTube video information.'); }
     finally { setVideoInfoBusy(false); }
   };
-  const blankCampaign = () => ({ title: '', channel: '', video: '', resource: '', resourceFile: null, resourceFileName: '', resourceType: 'link', limit: '', ends: '', status: 'Live', description: 'A new creator resource campaign.', handle: '', category: 'New resource', accent: '#777B77', initials: '' });
+  const blankCampaign = () => ({ title: '', channel: '', video: '', resource: '', resourceType: 'link', limit: '', ends: '', status: 'Live', description: 'A new creator resource campaign.', handle: '', category: 'New resource', accent: '#777B77', initials: '' });
   const openNewCampaign = () => { setEditingCampaignId(null); setNewCampaign(blankCampaign()); setVideoInfo(null); setVideoInfoError(''); setNewOpen(true); };
   const beginEditCampaign = campaign => {
     setCampaignMenuAnchor(null); setMenuCampaign(null); setEditingCampaignId(campaign.id);
-    setNewCampaign({ title: campaign.title, channel: campaign.channel, video: campaign.video, resource: campaign.resource || '', resourceFile: null, resourceFileName: campaign.resourceFileName || '', resourceType: campaign.resourceType || 'link', limit: campaign.limit || '', ends: campaign.ends === 'No end date' ? '' : campaign.ends, status: campaign.status || 'Live', description: campaign.description || '', handle: campaign.handle === '@creator' ? '' : (campaign.handle || ''), category: campaign.category || 'New resource', accent: campaign.accent || '#777B77', initials: campaign.initials || '' });
+    setNewCampaign({ title: campaign.title, channel: campaign.channel, video: campaign.video, resource: campaign.resource || '', resourceType: campaign.resourceType || 'link', limit: campaign.limit || '', ends: campaign.ends === 'No end date' ? '' : campaign.ends, status: campaign.status || 'Live', description: campaign.description || '', handle: campaign.handle === '@creator' ? '' : (campaign.handle || ''), category: campaign.category || 'New resource', accent: campaign.accent || '#777B77', initials: campaign.initials || '' });
     setVideoInfo(null); setVideoInfoError(''); setNewOpen(true);
   };
   const saveCampaign = async () => {
-    const resourceReady = newCampaign.resourceType === 'file' ? Boolean(newCampaign.resourceFile || newCampaign.resource.trim()) : Boolean(newCampaign.resource.trim());
-    if (campaignSaveBusy || !newCampaign.title.trim() || !newCampaign.channel.trim() || !newCampaign.video.trim() || !resourceReady) return;
+    if (campaignSaveBusy || !newCampaign.title.trim() || !newCampaign.channel.trim() || !newCampaign.video.trim() || !newCampaign.resource.trim()) return;
     setCampaignSaveBusy(true);
     const c = {
       id: editingCampaignId || `new-${Date.now()}`, title: newCampaign.title.trim(), channel: newCampaign.channel.trim(),
       handle: newCampaign.handle || '', category: newCampaign.category || 'New resource', accent: newCampaign.accent || '#777B77', claimed: editingCampaignId ? (studioCampaigns.find(item => item.id === editingCampaignId)?.claimed || 0) : 0,
       limit: newCampaign.limit ? Number(newCampaign.limit) : null,
       ends: newCampaign.ends || 'No end date', status: newCampaign.status || 'Live',
-      description: newCampaign.description || 'A new creator resource campaign.', resource: newCampaign.resource.trim(), resourceFileName: newCampaign.resourceFileName || '', resourceType: newCampaign.resourceType,
+      description: newCampaign.description || 'A new creator resource campaign.', resource: newCampaign.resource.trim(), resourceType: newCampaign.resourceType,
       video: newCampaign.video.trim(), initials: newCampaign.initials || newCampaign.channel.split(' ').map(x => x[0]).join('').slice(0, 2).toUpperCase(),
     };
-    let pendingUploadId = '';
     try {
       const isEditing = Boolean(editingCampaignId);
-      if (c.resourceType === 'file' && newCampaign.resourceFile) {
-        const uploadResponse = await fetch('/api/resources/upload', { method: 'POST', headers: { 'Content-Type': newCampaign.resourceFile.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(newCampaign.resourceFile.name) }, body: newCampaign.resourceFile });
-        const uploadResult = await uploadResponse.json().catch(() => ({}));
-        if (!uploadResponse.ok) throw new Error(uploadResult.detail || 'Could not upload the resource file.');
-        pendingUploadId = uploadResult.fileId;
-        c.resource = uploadResult.fileId; c.resourceFileName = uploadResult.fileName;
-      }
       const response = await fetch(isEditing ? `/api/campaigns/${encodeURIComponent(editingCampaignId)}` : '/api/campaigns', { method: isEditing ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(c) });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.detail || 'Could not save campaign.');
-      pendingUploadId = '';
       const saveRows = current => isEditing ? current.map(item => item.id === c.id ? c : item) : [c, ...current];
       setCampaigns(saveRows); setStudioCampaigns(saveRows); setNewCampaign(blankCampaign()); setEditingCampaignId(null); setNewOpen(false); notify(isEditing ? 'Campaign updated.' : 'Campaign saved.');
     } catch (error) {
-      if (pendingUploadId) fetch(`/api/resources/upload/${encodeURIComponent(pendingUploadId)}`, { method: 'DELETE' }).catch(() => {});
       notify(error.message || 'Campaign service unavailable.');
     } finally { setCampaignSaveBusy(false); }
   };
@@ -523,12 +516,10 @@ function App() {
         {selected && claimStep === 3 && <Stack spacing={2} alignItems="flex-start" sx={{ py: 1 }}>
           <Avatar sx={{ bgcolor: 'action.hover', color: 'text.primary', width: 48, height: 48 }}><CheckCircle /></Avatar><Typography variant="h5" fontWeight={720}>Claim confirmed</Typography><Typography color="text.secondary">Your resource is ready to open.</Typography>
           {selected.resourceType === 'text'
-            ? <Paper variant="outlined" sx={{ p: 2, width: '100%', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}><Typography variant="body2">{selected.resource}</Typography><Button size="small" startIcon={<ContentCopy />} sx={{ mt: 1 }} onClick={copyResourceText}>Copy resource text</Button></Paper>
-            : selected.resourceType === 'file'
-              ? <Stack spacing={1} alignItems="flex-start"><Typography variant="body2" color="text.secondary">{selected.resourceFileName || 'Your downloadable file'}</Typography><Button variant="contained" startIcon={<Download />} onClick={downloadResource}>Download resource</Button></Stack>
-              : <Button variant="contained" endIcon={<ArrowForward />} component="a" href={selected.resource} target="_blank" rel="noreferrer">Open resource</Button>}
+            ? <Paper variant="outlined" sx={{ p: 2, width: '100%', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}><Typography variant="body2">{selected.resource}</Typography><Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap' }}><Button size="small" startIcon={<ContentCopy />} onClick={copyResourceText}>Copy text</Button><Button size="small" startIcon={<Download />} onClick={downloadResourceText}>Save as .txt</Button></Stack></Paper>
+            : <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}><Button variant="contained" endIcon={<ArrowForward />} component="a" href={selected.resource} target="_blank" rel="noreferrer">Open resource</Button><Button startIcon={<ContentCopy />} onClick={copyResourceLink}>Copy link</Button></Stack>}
           <TextField label="Email (optional)" type="email" value={email} onChange={e => setEmail(e.target.value)} helperText="For future recovery. This prototype does not send or save your email." size="small" fullWidth sx={{ '& .MuiInputBase-root': { height: 44 }, '& .MuiInputBase-input': { py: 1 }, '& .MuiFormHelperText-root': { mt: 0.5, ml: 0 } }} />
-          <Alert severity="info" variant="outlined" sx={{ width: '100%', borderColor: 'divider', bgcolor: 'transparent' }}><Typography variant="caption">This unlock is saved only for this browser session. It may be lost when the session ends or site data is cleared. Copy or save the resource if you need it later.</Typography></Alert>
+          <Alert severity="info" variant="outlined" sx={{ width: '100%', borderColor: 'divider', bgcolor: 'transparent' }}><Typography variant="caption">Nothing is stored on the server. Your unlocked link or text lives only in this browser tab's session storage, so copy or save it now if you need it later.</Typography></Alert>
         </Stack>}
       </DialogContent>
       {(claimStep === 2 || claimStep === 3) && <DialogActions sx={{ p: 2 }}>
@@ -558,16 +549,14 @@ function App() {
           <Box><Typography variant="body2" fontWeight={700}>{videoInfo.title}</Typography><Typography variant="caption" color="text.secondary">{videoInfo.channel}{videoInfo.handle ? ` · ${videoInfo.handle}` : ''}</Typography></Box>
         </Paper>}
         <TextField label="Channel name" placeholder="Your YouTube channel" value={newCampaign.channel} onChange={e => setNewCampaign({ ...newCampaign, channel: e.target.value })} fullWidth />
-        <TextField select label="Resource type" value={newCampaign.resourceType} onChange={e => setNewCampaign({ ...newCampaign, resourceType: e.target.value, resource: '', resourceFile: null, resourceFileName: '' })} fullWidth><MenuItem value="link">Link</MenuItem><MenuItem value="text">Text</MenuItem><MenuItem value="file">Downloadable file</MenuItem></TextField>
+        <TextField select label="Resource type" value={newCampaign.resourceType} onChange={e => setNewCampaign({ ...newCampaign, resourceType: e.target.value, resource: '' })} fullWidth><MenuItem value="link">Link</MenuItem><MenuItem value="text">Text</MenuItem></TextField>
         {newCampaign.resourceType === 'link'
-          ? <TextField label="Resource link" placeholder="https://…" value={newCampaign.resource} onChange={e => setNewCampaign({ ...newCampaign, resource: e.target.value })} fullWidth />
-          : newCampaign.resourceType === 'text'
-            ? <TextField label="Resource text" placeholder="Write the text viewers can unlock…" value={newCampaign.resource} onChange={e => setNewCampaign({ ...newCampaign, resource: e.target.value })} multiline minRows={4} inputProps={{ maxLength: 5000 }} helperText={`${newCampaign.resource.length}/5000 characters`} fullWidth />
-            : <Stack spacing={1} alignItems="flex-start"><Button component="label" variant="outlined">{newCampaign.resourceFile || newCampaign.resource ? 'Replace file' : 'Choose file'}<input hidden type="file" accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.csv,.zip,.png,.jpg,.jpeg,.webp" onChange={e => { const file = e.target.files?.[0] || null; e.target.value = ''; setNewCampaign({ ...newCampaign, resource: '', resourceFile: file, resourceFileName: file?.name || '' }); }} /></Button><Typography variant="body2" color="text.secondary">{newCampaign.resourceFile?.name || newCampaign.resourceFileName || 'PDF, Office, text, CSV, ZIP, or image · up to 15 MB'}</Typography><Typography variant="caption" color="text.secondary">The file downloads only after a viewer’s comment is verified.</Typography></Stack>}
+          ? <TextField label="Resource link" placeholder="https://…" value={newCampaign.resource} onChange={e => setNewCampaign({ ...newCampaign, resource: e.target.value })} helperText="Shown only after a viewer’s comment is verified." fullWidth />
+          : <TextField label="Resource text" placeholder="Write the text viewers can unlock…" value={newCampaign.resource} onChange={e => setNewCampaign({ ...newCampaign, resource: e.target.value })} multiline minRows={4} inputProps={{ maxLength: 5000 }} helperText={`${newCampaign.resource.length}/5000 characters. Copied or saved from the viewer’s browser after verification.`} fullWidth />}
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}><TextField label="Claim limit (optional)" type="number" value={newCampaign.limit} onChange={e => setNewCampaign({ ...newCampaign, limit: e.target.value })} fullWidth /><TextField label="End date (optional)" type="date" InputLabelProps={{ shrink: true }} value={newCampaign.ends} onChange={e => setNewCampaign({ ...newCampaign, ends: e.target.value })} fullWidth /></Stack>
-        <Alert severity="info">You can fetch the Short’s public title and channel, then choose a link, plain text, or downloadable file to deliver after verification.</Alert>
+        <Alert severity="info">Choose a link or plain text to reveal after verification. Nothing is uploaded or stored as a file.</Alert>
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button disabled={campaignSaveBusy} onClick={() => { setNewOpen(false); setEditingCampaignId(null); }}>Cancel</Button><Button variant="contained" onClick={saveCampaign} disabled={campaignSaveBusy || !newCampaign.title.trim() || !newCampaign.channel.trim() || !newCampaign.video.trim() || !(newCampaign.resourceType === 'file' ? (newCampaign.resourceFile || newCampaign.resource.trim()) : newCampaign.resource.trim())}>{campaignSaveBusy ? 'Uploading…' : editingCampaignId ? 'Save changes' : 'Create campaign'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button disabled={campaignSaveBusy} onClick={() => { setNewOpen(false); setEditingCampaignId(null); }}>Cancel</Button><Button variant="contained" onClick={saveCampaign} disabled={campaignSaveBusy || !newCampaign.title.trim() || !newCampaign.channel.trim() || !newCampaign.video.trim() || !newCampaign.resource.trim()}>{campaignSaveBusy ? 'Saving…' : editingCampaignId ? 'Save changes' : 'Create campaign'}</Button></DialogActions>
     </Dialog>
 
     {snack && <Box role="status" sx={{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)', zIndex: 2000, bgcolor: 'text.primary', color: 'background.paper', px: 2.25, py: 1.2, borderRadius: 2, boxShadow: 4, fontSize: 13 }}>{snack}</Box>}

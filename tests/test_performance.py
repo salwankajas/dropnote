@@ -83,14 +83,11 @@ class DatabaseTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
         self.previous_db_path = server.DB_PATH
-        self.previous_upload_dir = server.UPLOAD_DIR
         server.DB_PATH = self.root / "perf.sqlite3"
-        server.UPLOAD_DIR = self.root / "uploads"
         server.init_db()
 
     def tearDown(self):
         server.DB_PATH = self.previous_db_path
-        server.UPLOAD_DIR = self.previous_upload_dir
         self.temp_dir.cleanup()
 
     def test_wal_mode_and_claim_indexes(self):
@@ -98,7 +95,6 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
             indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
 
-        self.assertIn("idx_claims_download_token", indexes)
         self.assertIn("idx_claims_campaign", indexes)
         self.assertIn("idx_campaigns_creator", indexes)
 

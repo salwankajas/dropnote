@@ -19,11 +19,11 @@ from typing import Literal
 from datetime import date
 from contextlib import closing
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request as UrlRequest, urlopen
 from urllib.error import HTTPError, URLError
 
-from fastapi import FastAPI, HTTPException, Depends, Request, Response, Header
+from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -31,15 +31,6 @@ from pydantic import BaseModel, Field
 from youtube_comment_downloader import YoutubeCommentDownloader, SORT_BY_RECENT
 
 DB_PATH = Path(os.environ.get("DROPNOTE_DB", "dropnote.sqlite3"))
-UPLOAD_DIR = Path(os.environ.get("DROPNOTE_UPLOAD_DIR", str(DB_PATH.parent / "dropnote-uploads")))
-MAX_RESOURCE_BYTES = 15 * 1024 * 1024
-RESOURCE_TOKEN_SECONDS = 7 * 24 * 60 * 60
-ALLOWED_RESOURCE_TYPES = {
-    ".pdf": "application/pdf", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    ".txt": "text/plain", ".md": "text/markdown", ".csv": "text/csv", ".zip": "application/zip",
-    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
-}
 MAX_SCAN_COMMENTS = int(os.environ.get("MAX_SCAN_COMMENTS", "250"))
 COMMENT_CACHE_TTL = float(os.environ.get("COMMENT_CACHE_TTL", "15"))
 COMMENT_CACHE_MAX_VIDEOS = int(os.environ.get("COMMENT_CACHE_MAX_VIDEOS", "64"))
@@ -98,8 +89,6 @@ def init_db():
                 video_id TEXT NOT NULL,
                 author_channel_id TEXT NOT NULL,
                 comment_id TEXT NOT NULL,
-                download_token_hash TEXT,
-                download_token_expires_at REAL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(video_id, author_channel_id)
             )
@@ -120,22 +109,9 @@ def init_db():
                 resource_url TEXT NOT NULL,
                 resource_type TEXT NOT NULL DEFAULT 'link',
                 resource_text TEXT NOT NULL DEFAULT '',
-                resource_file_id TEXT,
                 video_url TEXT NOT NULL,
                 initials TEXT NOT NULL,
                 creator_email TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS resource_files (
-                file_id TEXT PRIMARY KEY,
-                campaign_id TEXT,
-                uploaded_by TEXT NOT NULL,
-                original_name TEXT NOT NULL,
-                extension TEXT NOT NULL,
-                media_type TEXT NOT NULL,
-                size_bytes INTEGER NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -167,12 +143,7 @@ def init_db():
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         claim_columns = {row[1] for row in conn.execute("PRAGMA table_info(claims)")}
-        if "download_token_hash" not in claim_columns:
-            conn.execute("ALTER TABLE claims ADD COLUMN download_token_hash TEXT")
-        if "download_token_expires_at" not in claim_columns:
-            conn.execute("ALTER TABLE claims ADD COLUMN download_token_expires_at REAL")
         if "email" in claim_columns:
             # Remove any recovery email collected by an older prototype version.
             conn.execute("UPDATE claims SET email = NULL")
@@ -185,15 +156,14 @@ def init_db():
             conn.execute("ALTER TABLE campaigns ADD COLUMN resource_type TEXT NOT NULL DEFAULT 'link'")
         if "resource_text" not in campaign_columns:
             conn.execute("ALTER TABLE campaigns ADD COLUMN resource_text TEXT NOT NULL DEFAULT ''")
-        if "resource_file_id" not in campaign_columns:
-            conn.execute("ALTER TABLE campaigns ADD COLUMN resource_file_id TEXT")
+        # File resources were removed; park legacy file campaigns until an owner edits them.
+        conn.execute("UPDATE campaigns SET resource_type = 'link', status = 'Paused' WHERE resource_type NOT IN ('link', 'text')")
         creator_columns = {row[1] for row in conn.execute("PRAGMA table_info(creators)")}
         if "invite_approved" not in creator_columns:
             # Existing prototype accounts were created via open signup; require admin re-approval.
             conn.execute("ALTER TABLE creators ADD COLUMN invite_approved INTEGER NOT NULL DEFAULT 0")
-        # Cover the lookups used by downloads, studio listings and claim counters.
+        # Cover the lookups used by studio listings and claim counters.
         conn.execute("CREATE INDEX IF NOT EXISTS idx_claims_campaign ON claims(campaign_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_claims_download_token ON claims(download_token_hash)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_creator ON campaigns(creator_email)")
         conn.commit()
 
@@ -331,7 +301,7 @@ class CampaignUpdate(BaseModel):
     ends: str = Field(default='No end date', max_length=40)
     status: Literal["Live", "Paused"] = "Live"
     description: str = Field(default='A new creator resource campaign.', max_length=500)
-    resourceType: Literal["link", "text", "file"] = "link"
+    resourceType: Literal["link", "text"] = "link"
     resource: str = Field(min_length=1, max_length=5000)
     video: str = Field(min_length=10, max_length=500)
     initials: str = Field(default='CR', max_length=4)
@@ -348,7 +318,7 @@ class CampaignCreate(BaseModel):
     ends: str = Field(default='No end date', max_length=40)
     status: Literal["Live", "Paused"] = "Live"
     description: str = Field(default='A new creator resource campaign.', max_length=500)
-    resourceType: Literal["link", "text", "file"] = "link"
+    resourceType: Literal["link", "text"] = "link"
     resource: str = Field(min_length=1, max_length=5000)
     video: str = Field(min_length=10, max_length=500)
     initials: str = Field(default='CR', max_length=4)
@@ -571,105 +541,10 @@ def list_campaigns():
 def studio_campaigns(user=Depends(require_user)):
     with closing(db()) as conn:
         if user["role"] == "admin":
-            rows = conn.execute("SELECT c.campaign_id,c.title,c.channel,c.handle,c.category,c.accent,c.claimed,c.max_claims,c.ends_at,c.status,c.description,c.video_url,c.initials,c.resource_url,c.resource_type,c.resource_text,c.resource_file_id,rf.original_name AS resource_file_name,c.created_at FROM campaigns c LEFT JOIN resource_files rf ON rf.file_id=c.resource_file_id ORDER BY c.created_at DESC").fetchall()
+            rows = conn.execute("SELECT campaign_id,title,channel,handle,category,accent,claimed,max_claims,ends_at,status,description,video_url,initials,resource_url,resource_type,resource_text,created_at FROM campaigns ORDER BY created_at DESC").fetchall()
         else:
-            rows = conn.execute("SELECT c.campaign_id,c.title,c.channel,c.handle,c.category,c.accent,c.claimed,c.max_claims,c.ends_at,c.status,c.description,c.video_url,c.initials,c.resource_url,c.resource_type,c.resource_text,c.resource_file_id,rf.original_name AS resource_file_name,c.created_at FROM campaigns c LEFT JOIN resource_files rf ON rf.file_id=c.resource_file_id WHERE c.creator_email = ? ORDER BY c.created_at DESC", (user["email"],)).fetchall()
+            rows = conn.execute("SELECT campaign_id,title,channel,handle,category,accent,claimed,max_claims,ends_at,status,description,video_url,initials,resource_url,resource_type,resource_text,created_at FROM campaigns WHERE creator_email = ? ORDER BY created_at DESC", (user["email"],)).fetchall()
     return [dict(row) for row in rows]
-
-
-def stored_resource_path(file_id: str, extension: str) -> Path:
-    if not re.fullmatch(r"[A-Za-z0-9_-]{20,40}", file_id) or extension not in ALLOWED_RESOURCE_TYPES:
-        raise HTTPException(404, "Resource file not found.")
-    return UPLOAD_DIR / f"{file_id}{extension}"
-
-
-def safe_upload_name(raw_name: str, extension: str) -> str:
-    name = unquote(raw_name or "").replace("\\", "/").split("/")[-1]
-    name = re.sub(r"[\x00-\x1f\x7f]", "", name).strip()
-    name = re.sub(r"[^\w .()\-]", "_", name, flags=re.UNICODE)[:140].strip(" .")
-    if not name or Path(name).suffix.lower() != extension:
-        name = f"resource{extension}"
-    return name
-
-
-def validate_resource_file(conn, file_id: str, user: dict, campaign_id: str | None = None):
-    row = conn.execute("SELECT * FROM resource_files WHERE file_id = ?", (file_id,)).fetchone()
-    if not row:
-        raise HTTPException(404, "Upload the resource file before saving the campaign.")
-    if user["role"] != "admin" and row["uploaded_by"] != user["email"]:
-        raise HTTPException(403, "You do not have access to that uploaded file.")
-    if row["campaign_id"] not in (None, campaign_id):
-        raise HTTPException(409, "That file is already attached to another campaign.")
-    if not stored_resource_path(row["file_id"], row["extension"]).is_file():
-        raise HTTPException(410, "The uploaded file is missing from storage. Upload it again.")
-    return row
-
-
-@app.post("/api/resources/upload")
-async def upload_resource(request: Request, user=Depends(require_user)):
-    raw_name = request.headers.get("x-file-name", "")
-    if not raw_name:
-        raise HTTPException(400, "Choose a file to upload.")
-    decoded_name = unquote(raw_name).replace("\\", "/").split("/")[-1]
-    extension = Path(decoded_name).suffix.lower()
-    if extension not in ALLOWED_RESOURCE_TYPES:
-        raise HTTPException(415, "Choose a PDF, Office document, text, CSV, ZIP, or image file.")
-    try:
-        content_length = int(request.headers.get("content-length", "0"))
-    except ValueError:
-        content_length = 0
-    if content_length > MAX_RESOURCE_BYTES:
-        raise HTTPException(413, "Files must be 15 MB or smaller.")
-
-    file_id = secrets.token_urlsafe(18)
-    path = stored_resource_path(file_id, extension)
-    size = 0
-    prefix = bytearray()
-    try:
-        with path.open("xb") as output:
-            async for chunk in request.stream():
-                size += len(chunk)
-                if size > MAX_RESOURCE_BYTES:
-                    raise HTTPException(413, "Files must be 15 MB or smaller.")
-                if len(prefix) < 16:
-                    prefix.extend(chunk[:16 - len(prefix)])
-                output.write(chunk)
-        if size == 0:
-            raise HTTPException(400, "The selected file is empty.")
-        if extension == ".pdf" and not bytes(prefix).startswith(b"%PDF-"):
-            raise HTTPException(415, "The file does not appear to be a valid PDF.")
-        if extension == ".png" and not bytes(prefix).startswith(b"\x89PNG\r\n\x1a\n"):
-            raise HTTPException(415, "The file does not appear to be a valid PNG image.")
-        if extension in {".jpg", ".jpeg"} and not bytes(prefix).startswith(b"\xff\xd8\xff"):
-            raise HTTPException(415, "The file does not appear to be a valid JPEG image.")
-        if extension == ".webp" and (len(prefix) < 12 or bytes(prefix[:4]) != b"RIFF" or bytes(prefix[8:12]) != b"WEBP"):
-            raise HTTPException(415, "The file does not appear to be a valid WebP image.")
-        if extension in {".zip", ".docx", ".xlsx", ".pptx"} and not bytes(prefix).startswith(b"PK"):
-            raise HTTPException(415, "The file does not appear to be a valid ZIP-based document.")
-        filename = safe_upload_name(raw_name, extension)
-        with closing(db()) as conn:
-            conn.execute("INSERT INTO resource_files(file_id,campaign_id,uploaded_by,original_name,extension,media_type,size_bytes) VALUES(?,NULL,?,?,?,?,?)", (file_id,user["email"],filename,extension,ALLOWED_RESOURCE_TYPES[extension],size))
-            conn.commit()
-        return {"fileId": file_id, "fileName": filename, "sizeBytes": size, "contentType": ALLOWED_RESOURCE_TYPES[extension]}
-    except Exception:
-        path.unlink(missing_ok=True)
-        raise
-
-
-@app.delete("/api/resources/upload/{file_id}")
-def delete_pending_resource(file_id: str, user=Depends(require_user)):
-    with closing(db()) as conn:
-        row = conn.execute("SELECT * FROM resource_files WHERE file_id = ?", (file_id,)).fetchone()
-        if not row:
-            return {"ok": True}
-        if row["campaign_id"] is not None:
-            raise HTTPException(409, "This file is attached to a campaign.")
-        if user["role"] != "admin" and row["uploaded_by"] != user["email"]:
-            raise HTTPException(403, "You do not have access to that uploaded file.")
-        conn.execute("DELETE FROM resource_files WHERE file_id = ?", (file_id,))
-        conn.commit()
-    stored_resource_path(row["file_id"], row["extension"]).unlink(missing_ok=True)
-    return {"ok": True}
 
 
 @app.post("/api/youtube/info")
@@ -709,14 +584,10 @@ def create_campaign(payload: CampaignCreate, user=Depends(require_user)):
     with closing(db()) as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
-            if payload.resourceType == "file":
-                validate_resource_file(conn, payload.resource, user)
             conn.execute("""
-                INSERT INTO campaigns(campaign_id,title,channel,handle,category,accent,claimed,max_claims,ends_at,status,description,resource_url,resource_type,resource_text,resource_file_id,video_url,initials,creator_email)
-                VALUES(?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?,?)
-            """, (payload.id,payload.title,payload.channel,payload.handle,payload.category,payload.accent,payload.limit,payload.ends,payload.status,payload.description,payload.resource if payload.resourceType == "link" else "",payload.resourceType,payload.resource if payload.resourceType == "text" else "",payload.resource if payload.resourceType == "file" else None,payload.video,payload.initials,user["email"]))
-            if payload.resourceType == "file":
-                conn.execute("UPDATE resource_files SET campaign_id = ? WHERE file_id = ?", (payload.id,payload.resource))
+                INSERT INTO campaigns(campaign_id,title,channel,handle,category,accent,claimed,max_claims,ends_at,status,description,resource_url,resource_type,resource_text,video_url,initials,creator_email)
+                VALUES(?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?)
+            """, (payload.id,payload.title,payload.channel,payload.handle,payload.category,payload.accent,payload.limit,payload.ends,payload.status,payload.description,payload.resource if payload.resourceType == "link" else "",payload.resourceType,payload.resource if payload.resourceType == "text" else "",payload.video,payload.initials,user["email"]))
             conn.commit()
         except sqlite3.IntegrityError as exc:
             conn.rollback()
@@ -729,9 +600,8 @@ def update_campaign(campaign_id: str, payload: CampaignUpdate, user=Depends(requ
     extract_video_id(payload.video)
     if payload.resourceType == "link" and not payload.resource.startswith(("https://", "http://")):
         raise HTTPException(400, "Enter a valid resource URL.")
-    old_file_to_remove = None
     with closing(db()) as conn:
-        existing = conn.execute("SELECT creator_email,claimed,resource_file_id FROM campaigns WHERE campaign_id = ?", (campaign_id,)).fetchone()
+        existing = conn.execute("SELECT creator_email,claimed FROM campaigns WHERE campaign_id = ?", (campaign_id,)).fetchone()
         if not existing:
             raise HTTPException(404, "Campaign not found.")
         if user["role"] != "admin" and existing["creator_email"] != user["email"]:
@@ -739,23 +609,12 @@ def update_campaign(campaign_id: str, payload: CampaignUpdate, user=Depends(requ
         if payload.limit is not None and payload.limit < existing["claimed"]:
             raise HTTPException(409, "Claim limit cannot be lower than the number already claimed.")
         conn.execute("BEGIN IMMEDIATE")
-        new_file_id = payload.resource if payload.resourceType == "file" else None
-        if new_file_id:
-            validate_resource_file(conn, new_file_id, user, campaign_id)
-        old_file_id = existing["resource_file_id"]
-        if old_file_id and old_file_id != new_file_id:
-            old_file_to_remove = conn.execute("SELECT * FROM resource_files WHERE file_id = ?", (old_file_id,)).fetchone()
-            conn.execute("DELETE FROM resource_files WHERE file_id = ?", (old_file_id,))
         conn.execute("""
             UPDATE campaigns SET title=?,channel=?,handle=?,category=?,accent=?,max_claims=?,ends_at=?,status=?,description=?,
-                resource_url=?,resource_type=?,resource_text=?,resource_file_id=?,video_url=?,initials=? WHERE campaign_id=?
+                resource_url=?,resource_type=?,resource_text=?,video_url=?,initials=? WHERE campaign_id=?
         """, (payload.title,payload.channel,payload.handle,payload.category,payload.accent,payload.limit,payload.ends,payload.status,payload.description,
-              payload.resource if payload.resourceType == "link" else "",payload.resourceType,payload.resource if payload.resourceType == "text" else "",new_file_id,payload.video,payload.initials,campaign_id))
-        if new_file_id:
-            conn.execute("UPDATE resource_files SET campaign_id = ? WHERE file_id = ?", (campaign_id,new_file_id))
+              payload.resource if payload.resourceType == "link" else "",payload.resourceType,payload.resource if payload.resourceType == "text" else "",payload.video,payload.initials,campaign_id))
         conn.commit()
-    if old_file_to_remove:
-        stored_resource_path(old_file_to_remove["file_id"],old_file_to_remove["extension"]).unlink(missing_ok=True)
     return {"ok": True, "campaignId": campaign_id}
 
 
@@ -775,41 +634,15 @@ def update_campaign_status(campaign_id: str, payload: CampaignStatusUpdate, user
 @app.delete("/api/campaigns/{campaign_id}")
 def delete_campaign(campaign_id: str, user=Depends(require_user)):
     with closing(db()) as conn:
-        campaign = conn.execute("SELECT creator_email,resource_file_id FROM campaigns WHERE campaign_id = ?", (campaign_id,)).fetchone()
+        campaign = conn.execute("SELECT creator_email FROM campaigns WHERE campaign_id = ?", (campaign_id,)).fetchone()
         if not campaign:
             raise HTTPException(404, "Campaign not found.")
         if user["role"] != "admin" and campaign["creator_email"] != user["email"]:
             raise HTTPException(403, "You do not have access to this campaign.")
-        file_row = conn.execute("SELECT * FROM resource_files WHERE file_id = ?", (campaign["resource_file_id"],)).fetchone() if campaign["resource_file_id"] else None
-        if file_row:
-            conn.execute("DELETE FROM resource_files WHERE file_id = ?", (file_row["file_id"],))
         conn.execute("DELETE FROM claims WHERE campaign_id = ?", (campaign_id,))
         conn.execute("DELETE FROM campaigns WHERE campaign_id = ?", (campaign_id,))
         conn.commit()
-    if file_row:
-        stored_resource_path(file_row["file_id"],file_row["extension"]).unlink(missing_ok=True)
     return {"ok": True, "campaignId": campaign_id}
-
-
-@app.get("/api/campaigns/{campaign_id}/resource-file")
-def download_campaign_resource(campaign_id: str, x_resource_token: str = Header(default="")):
-    if not x_resource_token:
-        raise HTTPException(401, "Verify your comment before downloading this resource.")
-    token_hash = hashlib.sha256(x_resource_token.encode()).hexdigest()
-    with closing(db()) as conn:
-        row = conn.execute("""
-            SELECT rf.file_id,rf.extension,rf.original_name
-            FROM campaigns c
-            JOIN resource_files rf ON rf.file_id = c.resource_file_id
-            JOIN claims cl ON cl.campaign_id = c.campaign_id
-            WHERE c.campaign_id = ? AND cl.download_token_hash = ? AND cl.download_token_expires_at >= ?
-        """, (campaign_id,token_hash,time.time())).fetchone()
-    if not row:
-        raise HTTPException(403, "This download link is invalid or expired. Verify your comment again to get a fresh download.")
-    path = stored_resource_path(row["file_id"],row["extension"])
-    if not path.is_file():
-        raise HTTPException(410, "This resource file is no longer available.")
-    return FileResponse(path,filename=row["original_name"],media_type="application/octet-stream",headers={"X-Content-Type-Options":"nosniff","Cache-Control":"private, no-store"})
 
 
 @app.post("/api/verify")
@@ -830,13 +663,6 @@ def verify_comment(payload: VerifyRequest):
         except ValueError as exc:
             raise HTTPException(500, "Campaign end date is invalid.") from exc
     video_id = extract_video_id(campaign["video_url"])
-    resource_file_name = None
-    if campaign["resource_type"] == "file":
-        with closing(db()) as conn:
-            file_row = conn.execute("SELECT original_name,extension FROM resource_files WHERE file_id = ? AND campaign_id = ?", (campaign["resource_file_id"],payload.campaignId)).fetchone()
-        if not file_row or not stored_resource_path(campaign["resource_file_id"],file_row["extension"]).is_file():
-            raise HTTPException(410, "This resource file is no longer available.")
-        resource_file_name = file_row["original_name"]
 
     try:
         comments = recent_comments(video_id)
@@ -856,13 +682,10 @@ def verify_comment(payload: VerifyRequest):
     if not author_channel or not comment_id:
         raise HTTPException(502, "The comment was found, but its public channel identifier was unavailable.")
 
-    download_token = secrets.token_urlsafe(32) if campaign["resource_type"] == "file" else None
-    download_token_hash = hashlib.sha256(download_token.encode()).hexdigest() if download_token else None
-    download_token_expires_at = time.time() + RESOURCE_TOKEN_SECONDS if download_token else None
     try:
         with closing(db()) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            latest = conn.execute("SELECT claimed, max_claims, status, ends_at, resource_type, resource_file_id FROM campaigns WHERE campaign_id = ?", (payload.campaignId,)).fetchone()
+            latest = conn.execute("SELECT claimed, max_claims, status, ends_at, resource_type FROM campaigns WHERE campaign_id = ?", (payload.campaignId,)).fetchone()
             if not latest:
                 raise HTTPException(404, "Campaign not found.")
             if latest["status"] != "Live":
@@ -873,7 +696,7 @@ def verify_comment(payload: VerifyRequest):
                         raise HTTPException(410, "This campaign has ended.")
                 except ValueError as exc:
                     raise HTTPException(500, "Campaign end date is invalid.") from exc
-            if latest["resource_type"] != campaign["resource_type"] or latest["resource_file_id"] != campaign["resource_file_id"]:
+            if latest["resource_type"] != campaign["resource_type"]:
                 raise HTTPException(409, "The campaign resource changed while this claim was being checked. Please try again.")
             existing = conn.execute(
                 "SELECT campaign_id FROM claims WHERE video_id = ? AND author_channel_id = ?",
@@ -882,15 +705,13 @@ def verify_comment(payload: VerifyRequest):
             if existing:
                 if existing["campaign_id"] != payload.campaignId:
                     raise HTTPException(409, "This YouTube account has already claimed a drop for this video.")
-                # Idempotent re-verification restores access after session storage is cleared.
-                conn.execute("UPDATE claims SET download_token_hash = ?, download_token_expires_at = ? WHERE video_id = ? AND author_channel_id = ?", (download_token_hash,download_token_expires_at,video_id,author_channel))
                 already_claimed = True
             else:
                 if latest["max_claims"] and latest["claimed"] >= latest["max_claims"]:
                     raise HTTPException(410, "This campaign has reached its claim limit.")
                 conn.execute(
-                    "INSERT INTO claims(campaign_id, video_id, author_channel_id, comment_id, download_token_hash, download_token_expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (payload.campaignId, video_id, author_channel, comment_id,download_token_hash,download_token_expires_at),
+                    "INSERT INTO claims(campaign_id, video_id, author_channel_id, comment_id) VALUES (?, ?, ?, ?)",
+                    (payload.campaignId, video_id, author_channel, comment_id),
                 )
                 conn.execute("UPDATE campaigns SET claimed = claimed + 1 WHERE campaign_id = ?", (payload.campaignId,))
                 already_claimed = False
@@ -907,8 +728,6 @@ def verify_comment(payload: VerifyRequest):
         "resourceType": campaign["resource_type"],
         "resourceUrl": campaign["resource_url"] if campaign["resource_type"] == "link" else None,
         "resourceText": campaign["resource_text"] if campaign["resource_type"] == "text" else None,
-        "downloadToken": download_token,
-        "resourceFileName": resource_file_name,
         "message": "Comment code matched. Claim recorded for this YouTube channel on this video.",
     }
 

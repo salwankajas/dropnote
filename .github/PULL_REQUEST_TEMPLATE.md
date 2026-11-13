@@ -11,5 +11,5 @@
 ## Checklist
 
 - [ ] Documentation updated if needed
-- [ ] No secrets, user data, database files, or uploads included
+- [ ] No secrets, user data, or database files included
 - [ ] Security implications considered

@@ -11,7 +11,7 @@ Thanks for your interest in contributing. Dropnote is an early-stage prototype; 
 ## Before opening a pull request
 
 - Keep changes focused and preserve the restrained, accessible interface.
-- Do not commit `.env` files, credentials, database files, uploads, user data, or generated build artifacts.
+- Do not commit `.env` files, credentials, database files, user data, or generated build artifacts.
 - Add or update tests for backend behavior and security boundaries.
 - Run the checks below from the repository root:
 

@@ -8,7 +8,7 @@ Dropnote is an open-source prototype for creator campaigns that unlock a resourc
 
 - Responsive React and Material UI interface with light, dark, and system themes.
 - Creator Studio with campaign creation, editing, pause/resume, deletion, and campaign-specific share links.
-- Link, text, and private file resources. File uploads are limited to 15 MB and common document, text, archive, and image formats. Files are offered for download only after comment verification.
+- Link or plain-text resources. The link or text is returned only after comment verification and is revealed in the viewer's browser; nothing is uploaded or stored as a file.
 - Viewer-written comments with a generated claim sentence appended only when the viewer copies the comment.
 - Invite-only creator accounts. The admin creates email-bound, single-use invitation links; email delivery is not built in, so links are shared manually.
 - SQLite persistence for local accounts, sessions, campaigns, and claims.
@@ -78,24 +78,23 @@ Sign in to **Studio** with the environment-configured admin credentials. Use **I
 | `DROPNOTE_ADMIN_PASSWORD` | Environment-configured administrator password | Unset; admin login unavailable |
 | `DROPNOTE_COOKIE_SECURE` | Force Secure session cookies (`true` in HTTPS deployments) | Automatically inferred from request/proxy |
 | `DROPNOTE_DB` | SQLite database file | `dropnote.sqlite3` in the working directory |
-| `DROPNOTE_UPLOAD_DIR` | Private directory for resource files | `dropnote-uploads` beside the database |
 | `MAX_SCAN_COMMENTS` | Maximum recent comments examined during a check | `250` |
 | `COMMENT_CACHE_TTL` | Seconds a scraped comment page is reused; concurrent checks share one scrape | `15` |
 | `COMMENT_CACHE_MAX_VIDEOS` | Maximum videos kept in the comment cache | `64` |
 | `VIDEO_INFO_CACHE_TTL` | Seconds YouTube video metadata is cached in Studio | `600` |
 
-Never commit `.env`, real credentials, session cookies, invitation codes, database files, or user uploads. The repository includes `.env.example` with placeholders only.
+Never commit `.env`, real credentials, session cookies, invitation codes, or database files. The repository includes `.env.example` with placeholders only.
 
 ## Performance notes
 
 - The newest comments for a video are scraped once and reused for `COMMENT_CACHE_TTL` seconds, and parallel checks for the same video share a single scrape. Repeat checks drop from a multi-second network round trip to a few microseconds, which also reduces the chance of YouTube rate limiting. A comment posted within that cache window may need a retry; lower the TTL if that matters for your campaign.
-- SQLite runs in WAL mode with indexes for claim lookups, so downloads and campaign pages are not blocked while a claim is written.
+- SQLite runs in WAL mode with indexes for claim lookups, so campaign pages stay readable while a claim is written.
 - Hashed Vite assets are served with a one-year `immutable` cache, and API responses are marked `no-store`.
 - The Docker image runs as a non-root user and pre-compiles `server.py` so the first request after a cold start is faster.
 
-## File resources
+## How resources are delivered
 
-Creators choose **Downloadable file** in the campaign form and select an allowed file of at most 15 MB. Uploads are written outside the public static directory. After verification, the API returns a short-lived download token; the download endpoint requires that token and serves the file as an attachment. The token and unlocked resource are kept in the browser session, not in local persistent browser storage. Back up the upload directory together with the database, and configure both on durable private storage for deployments.
+Creators choose **Link** or **Text** in the campaign form. The link or text is stored as campaign configuration and is never included in the public campaign list; the API returns it only from `/api/verify` after a matching comment is found. The viewer then opens the link or copies/saves the text entirely in the browser. There is no upload endpoint, no file storage directory, and no download token, so a deployment only needs durable storage for the small SQLite database.
 
 ## Tests and build
 
@@ -116,7 +115,7 @@ Build the combined frontend/API image:
 docker build -t dropnote .
 ```
 
-Run it with private environment variables and a persistent volume for the SQLite database and uploads:
+Run it with private environment variables and a persistent volume for the SQLite database:
 
 ```bash
 docker run --rm -p 10000:10000 \
@@ -124,17 +123,16 @@ docker run --rm -p 10000:10000 \
   -e DROPNOTE_ADMIN_PASSWORD='use-a-long-unique-secret' \
   -e DROPNOTE_COOKIE_SECURE=true \
   -e DROPNOTE_DB=/data/dropnote.sqlite3 \
-  -e DROPNOTE_UPLOAD_DIR=/data/dropnote-uploads \
   -v dropnote-data:/data \
   dropnote
 ```
 
-The included `render.yaml` is a convenience for a **temporary test deployment**. Free/ephemeral hosts can sleep and may discard local databases and uploaded files. Do not rely on such a deployment for durable user accounts, campaigns, claims, or resources; use persistent storage and a managed database before hosting real users.
+The included `render.yaml` is a convenience for a **temporary test deployment**. Free/ephemeral hosts can sleep and may discard the local database. Do not rely on such a deployment for durable user accounts, campaigns, or claims; use a persistent disk or a managed database before hosting real users.
 
 ## GitHub publishing checklist
 
 1. Create a new empty repository on GitHub and choose its visibility. Do not add a generated README or license there; this project already includes both.
-2. From the project directory, review the files that will be committed. `.gitignore` excludes local databases, `.env` files, uploads, builds, screenshots, and generated preview bundles.
+2. From the project directory, review the files that will be committed. `.gitignore` excludes local databases, `.env` files, builds, screenshots, and generated preview bundles.
 3. Initialize and push the repository:
 
    ```bash
@@ -148,7 +146,7 @@ The included `render.yaml` is a convenience for a **temporary test deployment**.
    ```
 
 4. Replace `YOUR-USERNAME` with the repository owner. In GitHub, enable private vulnerability reporting and review the repository description, topics, and default branch.
-5. If deploying, configure admin credentials and durable database/file storage as server-side secrets/settings. Never put production secrets in GitHub source or frontend variables.
+5. If deploying, configure admin credentials and durable database storage as server-side secrets/settings. Never put production secrets in GitHub source or frontend variables.
 
 If this folder is already a Git repository, inspect `git status` and remotes before initializing or pushing; do not overwrite an existing history.
 
@@ -158,7 +156,7 @@ If this folder is already a Git repository, inspect `git status` and remotes bef
 - The “comment to unlock” mechanic may conflict with YouTube fake-engagement rules. Review current platform policies and obtain qualified advice before public use.
 - Email ownership is not independently verified during creator signup. A private invitation link is bound to an email string, but the prototype does not prove the registrant controls that inbox.
 - There is no email sending, account recovery, CAPTCHA, or distributed login/signup rate limiting. The optional recovery email field is display-only and is not sent to or saved by the backend.
-- SQLite and local file storage are suitable only for local use or temporary demos. Configure durable storage, backups, retention controls, and appropriate access controls before using real user data.
+- SQLite is suitable only for local use or temporary demos. Configure durable storage, backups, retention controls, and appropriate access controls before using real user data.
 - A YouTube channel ID identifies an account/channel, not a unique human; one person can use multiple YouTube accounts.
 
 ## License
