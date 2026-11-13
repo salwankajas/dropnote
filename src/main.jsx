@@ -61,6 +61,44 @@ const campaignIsAvailable = campaign => {
   return /^\d{4}-\d{2}-\d{2}$/.test(campaign.ends) && campaign.ends >= todayIso;
 };
 
+function DropnoteMark({ size = 20, color = 'currentColor', sx = {} }) {
+  return (
+    <Box
+      component="svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      sx={{ width: size, height: size, display: 'block', ...sx }}
+    >
+      <path
+        d="M12 2.75C10.5 5 6 11.25 6 15.75C6 19.2 8.7 21.75 12 21.75C15.3 21.75 18 19.2 18 15.75C18 11.25 13.5 5 12 2.75Z"
+        stroke={color}
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M12 2.75V8C12 8.8 12.7 9.5 13.5 9.5H17.2L12 2.75Z"
+        fill={color}
+        fillOpacity="0.25"
+      />
+      <path
+        d="M12 2.75V8C12 8.8 12.7 9.5 13.5 9.5H17.2"
+        stroke={color}
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M9.5 14H14.5M9.5 17H13"
+        stroke={color}
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+    </Box>
+  );
+}
+
 function NavTab({ active, onClick, children }) {
   return <Button
     onClick={onClick}
@@ -474,7 +512,9 @@ function App() {
         <Toolbar disableGutters sx={{ minHeight: { xs: 64, md: 72 }, px: { xs: 2, md: 0 }, gap: 2 }}>
           <Button onClick={() => setView('discover')} color="inherit" sx={{ p: 0, minWidth: 0, textAlign: 'left', '&:hover': { bgcolor: 'transparent' } }}>
             <Stack direction="row" alignItems="center" spacing={1.15}>
-              <Box sx={{ width: 34, height: 34, borderRadius: 1.5, bgcolor: 'primary.main', color: 'primary.contrastText', display: 'grid', placeItems: 'center' }}><AutoAwesome sx={{ fontSize: 19 }} /></Box>
+              <Box sx={{ width: 34, height: 34, borderRadius: 1.5, bgcolor: 'primary.main', color: 'primary.contrastText', display: 'grid', placeItems: 'center' }}>
+                <DropnoteMark size={20} color="currentColor" />
+              </Box>
               <Box><Typography sx={{ fontWeight: 780, fontSize: 18, letterSpacing: '-.04em', lineHeight: 1.1 }}>dropnote</Typography><Typography sx={{ fontSize: 10, color: 'text.secondary', letterSpacing: '.09em', textTransform: 'uppercase', mt: .25 }}>Creator drops</Typography></Box>
             </Stack>
           </Button>
