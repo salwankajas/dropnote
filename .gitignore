@@ -39,6 +39,7 @@ __pycache__/
 *.mp4
 *.zip
 *.log
+!docs/screenshots/*.png
 
 # Workspace/tool artifacts
 .cache/

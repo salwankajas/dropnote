@@ -4,6 +4,15 @@ Dropnote is an open-source prototype for creator campaigns that unlock a resourc
 
 > **Prototype notice:** The verification flow scrapes public YouTube comments and is best-effort. This project is not production-ready; review YouTube policies and the security, privacy, and persistence limitations below before using it with real users or valuable resources.
 
+<p align="center">
+  <img src="docs/screenshots/discover-light.png" alt="Dropnote Discover View" width="100%" />
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/drop-claim-modal.png" alt="Dropnote Comment Claim Modal" width="49%" />
+  <img src="docs/screenshots/discover-dark.png" alt="Dropnote Dark Mode" width="49%" />
+</p>
+
 ## Features
 
 - Responsive React and Material UI interface with light, dark, and system themes.
