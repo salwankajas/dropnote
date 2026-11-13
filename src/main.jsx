@@ -78,12 +78,12 @@ function DropnoteMark({ size = 20, color = 'currentColor', sx = {} }) {
         strokeLinejoin="round"
       />
       <path
-        d="M12 2.75V8C12 8.8 12.7 9.5 13.5 9.5H17.2L12 2.75Z"
+        d="M12 2.75V7.5C12 8.2 12.5 8.7 13.2 8.7H14.4L12 2.75Z"
         fill={color}
         fillOpacity="0.25"
       />
       <path
-        d="M12 2.75V8C12 8.8 12.7 9.5 13.5 9.5H17.2"
+        d="M12 2.75V7.5C12 8.2 12.5 8.7 13.2 8.7H14.4"
         stroke={color}
         strokeWidth="1.8"
         strokeLinecap="round"
