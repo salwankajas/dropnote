@@ -80,8 +80,18 @@ Sign in to **Studio** with the environment-configured admin credentials. Use **I
 | `DROPNOTE_DB` | SQLite database file | `dropnote.sqlite3` in the working directory |
 | `DROPNOTE_UPLOAD_DIR` | Private directory for resource files | `dropnote-uploads` beside the database |
 | `MAX_SCAN_COMMENTS` | Maximum recent comments examined during a check | `250` |
+| `COMMENT_CACHE_TTL` | Seconds a scraped comment page is reused; concurrent checks share one scrape | `15` |
+| `COMMENT_CACHE_MAX_VIDEOS` | Maximum videos kept in the comment cache | `64` |
+| `VIDEO_INFO_CACHE_TTL` | Seconds YouTube video metadata is cached in Studio | `600` |
 
 Never commit `.env`, real credentials, session cookies, invitation codes, database files, or user uploads. The repository includes `.env.example` with placeholders only.
+
+## Performance notes
+
+- The newest comments for a video are scraped once and reused for `COMMENT_CACHE_TTL` seconds, and parallel checks for the same video share a single scrape. Repeat checks drop from a multi-second network round trip to a few microseconds, which also reduces the chance of YouTube rate limiting. A comment posted within that cache window may need a retry; lower the TTL if that matters for your campaign.
+- SQLite runs in WAL mode with indexes for claim lookups, so downloads and campaign pages are not blocked while a claim is written.
+- Hashed Vite assets are served with a one-year `immutable` cache, and API responses are marked `no-store`.
+- The Docker image runs as a non-root user and pre-compiles `server.py` so the first request after a cold start is faster.
 
 ## File resources
 

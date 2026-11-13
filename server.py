@@ -14,6 +14,7 @@ import secrets
 import sqlite3
 import time
 import json
+import threading
 from typing import Literal
 from datetime import date
 from contextlib import closing
@@ -40,6 +41,10 @@ ALLOWED_RESOURCE_TYPES = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
 }
 MAX_SCAN_COMMENTS = int(os.environ.get("MAX_SCAN_COMMENTS", "250"))
+COMMENT_CACHE_TTL = float(os.environ.get("COMMENT_CACHE_TTL", "15"))
+COMMENT_CACHE_MAX_VIDEOS = int(os.environ.get("COMMENT_CACHE_MAX_VIDEOS", "64"))
+VIDEO_INFO_CACHE_TTL = float(os.environ.get("VIDEO_INFO_CACHE_TTL", "600"))
+DB_TIMEOUT_SECONDS = 5.0
 CODE_RE = re.compile(r"^[a-z]{2,10}(?:[- ]+[a-z]{2,10}){2,}\.?$", re.IGNORECASE)
 
 app = FastAPI(title="Dropnote verification service", version="0.2.0")
@@ -54,6 +59,18 @@ if (DIST_PATH / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=DIST_PATH / "assets"), name="assets")
 
 
+@app.middleware("http")
+async def cache_policy(request: Request, call_next):
+    """Hashed build assets can be cached forever; API responses never can."""
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/assets/") and response.status_code == 200:
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif path.startswith("/api/") and "cache-control" not in response.headers:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.get("/")
 def frontend():
     index = DIST_PATH / "index.html"
@@ -63,13 +80,17 @@ def frontend():
 
 
 def db():
-    connection = sqlite3.connect(DB_PATH)
+    connection = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT_SECONDS)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout = 5000")
+    connection.execute("PRAGMA synchronous = NORMAL")
     return connection
 
 
 def init_db():
     with closing(db()) as conn:
+        # WAL keeps reads (campaign pages, downloads) available while a claim is written.
+        conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS claims (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -170,6 +191,10 @@ def init_db():
         if "invite_approved" not in creator_columns:
             # Existing prototype accounts were created via open signup; require admin re-approval.
             conn.execute("ALTER TABLE creators ADD COLUMN invite_approved INTEGER NOT NULL DEFAULT 0")
+        # Cover the lookups used by downloads, studio listings and claim counters.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_claims_campaign ON claims(campaign_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_claims_download_token ON claims(download_token_hash)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_creator ON campaigns(creator_email)")
         conn.commit()
 
 
@@ -189,6 +214,82 @@ def extract_video_id(raw_url: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id or ""):
         raise HTTPException(400, "Could not read a valid YouTube video ID from that link.")
     return video_id
+
+
+# --- Short-lived caches -------------------------------------------------------
+# Comment scraping is network bound and slow (seconds), so each video is scraped
+# at most once per COMMENT_CACHE_TTL window and concurrent checks share the work.
+_comment_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
+_comment_locks: dict[str, threading.Lock] = {}
+_cache_lock = threading.Lock()
+_video_info_cache: dict[str, tuple[float, dict[str, str]]] = {}
+
+
+def _fresh_comments(video_id: str) -> list[dict[str, str]] | None:
+    entry = _comment_cache.get(video_id)
+    if entry and time.monotonic() - entry[0] < COMMENT_CACHE_TTL:
+        return entry[1]
+    return None
+
+
+def _video_lock(video_id: str) -> threading.Lock:
+    with _cache_lock:
+        lock = _comment_locks.get(video_id)
+        if lock is None:
+            lock = _comment_locks[video_id] = threading.Lock()
+        return lock
+
+
+def _store_comments(video_id: str, comments: list[dict[str, str]]) -> None:
+    with _cache_lock:
+        _comment_cache[video_id] = (time.monotonic(), comments)
+        overflow = len(_comment_cache) - COMMENT_CACHE_MAX_VIDEOS
+        if overflow > 0:
+            oldest = sorted(_comment_cache.items(), key=lambda item: item[1][0])[:overflow]
+            for stale_id, _ in oldest:
+                _comment_cache.pop(stale_id, None)
+                lock = _comment_locks.get(stale_id)
+                if lock is None or not lock.locked():
+                    _comment_locks.pop(stale_id, None)
+
+
+def recent_comments(video_id: str) -> list[dict[str, str]]:
+    """Newest comments for a video, coalescing parallel requests into one scrape."""
+    comments = _fresh_comments(video_id)
+    if comments is not None:
+        return comments
+    with _video_lock(video_id):
+        comments = _fresh_comments(video_id)
+        if comments is not None:
+            return comments
+        scraped: list[dict[str, str]] = []
+        for comment in YoutubeCommentDownloader().get_comments(video_id, SORT_BY_RECENT):
+            scraped.append({
+                "text": comment.get("text") or "",
+                "channel": (comment.get("channel") or "").strip(),
+                "cid": (comment.get("cid") or "").strip(),
+            })
+            if len(scraped) >= MAX_SCAN_COMMENTS:
+                break
+        _store_comments(video_id, scraped)
+        return scraped
+
+
+def cached_video_info(video_id: str) -> dict[str, str] | None:
+    entry = _video_info_cache.get(video_id)
+    if entry and time.monotonic() - entry[0] < VIDEO_INFO_CACHE_TTL:
+        return entry[1]
+    return None
+
+
+def store_video_info(video_id: str, info: dict[str, str]) -> dict[str, str]:
+    with _cache_lock:
+        _video_info_cache[video_id] = (time.monotonic(), info)
+        if len(_video_info_cache) > 256:
+            oldest = sorted(_video_info_cache.items(), key=lambda item: item[1][0])[: len(_video_info_cache) - 256]
+            for stale_id, _ in oldest:
+                _video_info_cache.pop(stale_id, None)
+    return info
 
 
 class VerifyRequest(BaseModel):
@@ -574,6 +675,9 @@ def delete_pending_resource(file_id: str, user=Depends(require_user)):
 @app.post("/api/youtube/info")
 def youtube_video_info(payload: VideoInfoRequest, user=Depends(require_user)):
     video_id = extract_video_id(payload.video)
+    cached = cached_video_info(video_id)
+    if cached is not None:
+        return cached
     oembed_url = f"https://www.youtube.com/oembed?url={quote(f'https://www.youtube.com/watch?v={video_id}', safe='')}&format=json"
     request = UrlRequest(oembed_url, headers={"User-Agent": "Dropnote/1.0 (+video metadata preview)"})
     try:
@@ -587,14 +691,14 @@ def youtube_video_info(payload: VideoInfoRequest, user=Depends(require_user)):
         raise HTTPException(502, "Could not fetch YouTube details right now. Check the video link and try again.") from exc
     author_url = info.get("author_url", "")
     handle = urlparse(author_url).path.rsplit("/", 1)[-1] if author_url else ""
-    return {
+    return store_video_info(video_id, {
         "videoId": video_id,
         "title": info.get("title", ""),
         "channel": info.get("author_name", ""),
         "channelUrl": author_url,
         "handle": handle if handle.startswith("@") else "",
         "thumbnailUrl": info.get("thumbnail_url", ""),
-    }
+    })
 
 
 @app.post("/api/campaigns")
@@ -735,21 +839,18 @@ def verify_comment(payload: VerifyRequest):
         resource_file_name = file_row["original_name"]
 
     try:
-        comments = YoutubeCommentDownloader().get_comments(video_id, SORT_BY_RECENT)
-        match = None
-        scanned = 0
-        for comment in comments:
-            scanned += 1
-            if normalized_code in (comment.get("text") or "").casefold():
-                match = comment
-                break
-            if scanned >= MAX_SCAN_COMMENTS:
-                break
+        comments = recent_comments(video_id)
     except Exception as exc:
         raise HTTPException(502, f"Could not check comments right now: {str(exc)[:180]}") from exc
 
+    match = None
+    for comment in comments:
+        if normalized_code in comment["text"].casefold():
+            match = comment
+            break
+
     if not match:
-        raise HTTPException(404, f"No matching comment found in the latest {min(scanned, MAX_SCAN_COMMENTS)} comments. Make sure it is public and try again.")
+        raise HTTPException(404, f"No matching comment found in the latest {len(comments)} comments. Make sure it is public and try again.")
     author_channel = (match.get("channel") or "").strip()
     comment_id = (match.get("cid") or "").strip()
     if not author_channel or not comment_id:
