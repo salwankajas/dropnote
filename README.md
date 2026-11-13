@@ -10,7 +10,12 @@ Dropnote is an open-source prototype for creator campaigns that unlock a resourc
 
 <p align="center">
   <img src="docs/screenshots/drop-claim-modal.png" alt="Dropnote Comment Claim Modal" width="49%" />
-  <img src="docs/screenshots/discover-dark.png" alt="Dropnote Dark Mode" width="49%" />
+  <img src="docs/screenshots/studio-dashboard-light.png" alt="Dropnote Creator Studio" width="49%" />
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/studio-bulk-selected.png" alt="Studio Bulk Campaign Management" width="49%" />
+  <img src="docs/screenshots/studio-dashboard-dark.png" alt="Studio Dark Mode" width="49%" />
 </p>
 
 ## Features
