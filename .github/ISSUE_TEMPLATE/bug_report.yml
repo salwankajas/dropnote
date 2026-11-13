@@ -1,0 +1,28 @@
+name: Bug report
+description: Report a reproducible problem
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Please do not include passwords, private invite links, recovery details, or personal data.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: Git commit or release tag
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the expected and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: Redact emails, tokens, cookies, and other private information.
+    validations:
+      required: false

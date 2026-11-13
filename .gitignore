@@ -1,0 +1,50 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Dependencies and generated frontend output
+node_modules/
+dist/
+.vite/
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# Local databases, uploads, and runtime files
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+dropnote-uploads/
+uploads/
+
+# Local preview/export artifacts and screenshots
+/dropnote-preview.html
+/dropnote-render-ready.zip
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.mp4
+*.zip
+*.log
+
+# Workspace/tool artifacts
+.cache/
+.local/
+.npm/
+.edgeone/
+.arena/
+.playwright-cli/
+/bin/
+edgeone-*/
+.sudo_as_admin_successful
+.DS_Store
+Thumbs.db

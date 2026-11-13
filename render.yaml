@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: dropnote-test
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: MAX_SCAN_COMMENTS
+        value: "250"
+      - key: DROPNOTE_ADMIN_EMAIL
+        sync: false
+      - key: DROPNOTE_ADMIN_PASSWORD
+        sync: false
+      - key: DROPNOTE_COOKIE_SECURE
+        value: "true"
