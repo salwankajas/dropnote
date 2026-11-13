@@ -1,16 +1,18 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  Alert, AppBar, Avatar, Box, Button, Card, CardContent, Chip, Container, CssBaseline,
+  Alert, AppBar, Avatar, Box, Button, Card, CardContent, Checkbox, Chip, Container, CssBaseline,
   Dialog, DialogActions, DialogContent, DialogTitle, Divider, FormControl, IconButton, InputLabel,
   LinearProgress, Menu, MenuItem, Paper, Select, Stack,
   TextField, ThemeProvider, Toolbar, Tooltip, Typography, createTheme
 } from '@mui/material';
 import {
   Add, ArrowBack, ArrowForward, AutoAwesome, BrightnessAuto, DarkMode,
-  LightMode, CalendarMonth, Campaign, CheckCircle, ContentCopy, Groups, InfoOutlined,
-  Launch, MoreHoriz, YouTube, Download
+  LightMode, CalendarMonth, Campaign, CheckCircle, ContentCopy, GitHub, Groups, InfoOutlined,
+  Launch, Menu as MenuIcon, MoreHoriz, YouTube, Download, Pause, PlayArrow, DeleteOutline, AccessTime
 } from '@mui/icons-material';
+
+const repositoryUrl = 'https://github.com/salwankajas/dropnote';
 
 const seedCampaigns = [];
 
@@ -59,16 +61,38 @@ const campaignIsAvailable = campaign => {
   return /^\d{4}-\d{2}-\d{2}$/.test(campaign.ends) && campaign.ends >= todayIso;
 };
 
+function NavTab({ active, onClick, children }) {
+  return <Button
+    onClick={onClick}
+    disableElevation
+    sx={{
+      minWidth: 0, px: 1.9, py: .7, borderRadius: 99,
+      fontSize: 13.5, fontWeight: 650, lineHeight: 1.4,
+      color: active ? 'text.primary' : 'text.secondary',
+      bgcolor: active ? 'background.paper' : 'transparent',
+      border: 1, borderColor: active ? 'divider' : 'transparent',
+      boxShadow: active ? '0 1px 2px rgba(0, 0, 0, .06)' : 'none',
+      '&:hover': { bgcolor: active ? 'background.paper' : 'action.hover', color: 'text.primary' }
+    }}
+  >{children}</Button>;
+}
+
 function App() {
   const [mode, setMode] = useState(() => localStorage.getItem('dropnote-theme') || 'system');
   const [systemDark, setSystemDark] = useState(() => window.matchMedia?.('(prefers-color-scheme: dark)').matches || false);
   const [themeAnchor, setThemeAnchor] = useState(null);
+  const [mobileNavAnchor, setMobileNavAnchor] = useState(null);
   const [accountAnchor, setAccountAnchor] = useState(null);
   const [campaignMenuAnchor, setCampaignMenuAnchor] = useState(null);
   const [menuCampaign, setMenuCampaign] = useState(null);
   const [editingCampaignId, setEditingCampaignId] = useState(null);
   const [deleteCampaign, setDeleteCampaign] = useState(null);
-  const [view, setView] = useState('discover');
+  const [view, setView] = useState(() => {
+    if (typeof window !== 'undefined' && window.location.pathname.toLowerCase().includes('studio')) {
+      return 'studio';
+    }
+    return 'discover';
+  });
   const [currentUser, setCurrentUser] = useState(null);
   const [sharedCampaignId] = useState(() => new URLSearchParams(window.location.search).get('campaign') || '');
   const [campaignLinkNotice, setCampaignLinkNotice] = useState('');
@@ -95,6 +119,9 @@ function App() {
   const [claimed, setClaimed] = useState(readClaimed);
   const [filter, setFilter] = useState('All channels');
   const [discoverFilter, setDiscoverFilter] = useState('All channels');
+  const [selectedCampaignIds, setSelectedCampaignIds] = useState(new Set());
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   const [campaignSaveBusy, setCampaignSaveBusy] = useState(false);
   const [snack, setSnack] = useState('');
@@ -128,7 +155,7 @@ function App() {
       if (synced.length) setCampaigns(current => [...synced, ...current.filter(c => !synced.some(s => s.id === c.id))]);
       if (sharedCampaignId) {
         const direct = synced.find(c => c.id === sharedCampaignId) || seedCampaigns.find(c => c.id === sharedCampaignId);
-        if (!direct || (!campaignIsAvailable(direct) && !unlockedResources[direct.id])) setCampaignLinkNotice('This campaign link is invalid or the drop is no longer available.');
+        if (!direct) setCampaignLinkNotice('This campaign link is invalid or has been deleted.');
         else { setDiscoverFilter('All channels'); beginClaim(direct); }
       }
     }).catch(() => { if (sharedCampaignId) setCampaignLinkNotice('Could not load this campaign. Please try again.'); });
@@ -172,7 +199,12 @@ function App() {
 
   const notify = message => { setSnack(message); window.setTimeout(() => setSnack(''), 2800); };
   const copyComment = async (continueToVerify = false) => {
-    const text = [commentText.trim(), claimCode].filter(Boolean).join(' ');
+    let cleanComment = commentText.trim().replace(/[,;]+$/, '');
+    if (cleanComment && !/[.!?]$/.test(cleanComment)) {
+      cleanComment += '.';
+      setCommentText(cleanComment);
+    }
+    const text = [cleanComment, claimCode].filter(Boolean).join(' ');
     try {
       await navigator.clipboard.writeText(text);
       notify('Your comment and claim sentence were copied. Paste them as a comment on the video.');
@@ -184,14 +216,21 @@ function App() {
     catch { notify('Clipboard unavailable. Copy the link manually.'); }
   };
   const downloadResourceText = () => {
-    const text = selected?.resource || '';
-    if (!text) { notify('No resource text to save.'); return; }
+    const resource = selected?.resource || '';
+    if (!resource) { notify('No resource to download.'); return; }
     const safeTitle = (selected?.title || 'dropnote-resource').replace(/[^\w\- ]+/g, '').trim().slice(0, 60) || 'dropnote-resource';
-    const objectUrl = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+    const content = resource.trim();
+
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const objectUrl = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
-    anchor.href = objectUrl; anchor.download = `${safeTitle}.txt`; document.body.appendChild(anchor); anchor.click(); anchor.remove();
+    anchor.href = objectUrl;
+    anchor.download = `${safeTitle}.txt`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
-    notify('Resource text saved on your device.');
+    notify('Resource downloaded as .txt file.');
   };
   const copyResourceText = async () => {
     try { await navigator.clipboard.writeText(selected?.resource || ''); notify('Resource text copied.'); }
@@ -254,6 +293,9 @@ function App() {
       setSelected({ ...campaign, ...unlocked }); setClaimStep(3); setVerifyError(''); return;
     }
     if (claimed[campaign.id]) { notify('This browser has already claimed this drop. The resource is available only for the browser session in which it was unlocked.'); return; }
+    if (!campaignIsAvailable(campaign)) {
+      setSelected(campaign); setClaimStep('unavailable'); setVerifyError(''); return;
+    }
     setSelected(campaign); setClaimStep(1); setClaimCode(makeClaimSentence()); setCommentText(''); setEmail(''); setVerifyError('');
   };
   const closeClaim = () => { setSelected(null); setClaimStep(0); setVerifyError(''); };
@@ -342,41 +384,135 @@ function App() {
       notify('Campaign deleted.'); setDeleteCampaign(null);
     } catch (error) { notify(error.message || 'Could not delete campaign.'); }
   };
+
   const studioChannels = ['All channels', ...new Set(studioCampaigns.map(c => c.channel))];
   const filteredStudioCampaigns = studioCampaigns.filter(c => filter === 'All channels' || c.channel === filter);
   const activeCampaigns = campaigns.filter(campaignIsAvailable);
-  // Keep this viewer's unlocked drops visible for the remainder of the browser session, even if the last claim filled the cap.
-  const discoverCampaigns = campaigns.filter(c => campaignIsAvailable(c) || Boolean(claimed[c.id]));
+  // Show all drops created in Studio on the public page; unavailable drops show as capped/ended so new visitors can explore them without claiming.
+  const discoverCampaigns = campaigns;
   const discoverChannels = [...new Set(discoverCampaigns.map(c => c.channel))];
   const filteredDiscoverCampaigns = discoverCampaigns.filter(c => discoverFilter === 'All channels' || c.channel === discoverFilter);
   const totalClaims = studioCampaigns.reduce((sum, c) => sum + c.claimed, 0);
   const progress = campaign => campaign.limit ? Math.min(100, Math.round(campaign.claimed / campaign.limit * 100)) : 0;
 
+  const toggleSelectCampaign = id => {
+    setSelectedCampaignIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const isAllSelected = filteredStudioCampaigns.length > 0 && filteredStudioCampaigns.every(c => selectedCampaignIds.has(c.id));
+  const isSomeSelected = filteredStudioCampaigns.some(c => selectedCampaignIds.has(c.id)) && !isAllSelected;
+
+  const toggleSelectAll = () => {
+    if (isAllSelected) {
+      setSelectedCampaignIds(new Set());
+    } else {
+      setSelectedCampaignIds(new Set(filteredStudioCampaigns.map(c => c.id)));
+    }
+  };
+
+  const handleBatchStatus = async (status, targetIds = null) => {
+    setBatchBusy(true);
+    try {
+      const ids = targetIds || [];
+      const response = await fetch('/api/studio/campaigns/batch-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ campaign_ids: ids, status })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || 'Could not update campaigns.');
+      const updateRows = rows => rows.map(item => (!ids.length || ids.includes(item.id)) ? { ...item, status } : item);
+      setCampaigns(updateRows);
+      setStudioCampaigns(updateRows);
+      if (ids.length) {
+        notify(`${status === 'Paused' ? 'Paused' : 'Resumed'} ${ids.length} selected campaign${ids.length > 1 ? 's' : ''}.`);
+        setSelectedCampaignIds(new Set());
+      } else {
+        notify(`All campaigns ${status === 'Paused' ? 'paused' : 'are live'}.`);
+      }
+    } catch (error) {
+      notify(error.message || 'Batch action failed.');
+    } finally {
+      setBatchBusy(false);
+    }
+  };
+
+  const confirmBatchDelete = async () => {
+    const ids = Array.from(selectedCampaignIds);
+    if (!ids.length) return;
+    setBatchBusy(true);
+    try {
+      const response = await fetch('/api/studio/campaigns/batch-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ campaign_ids: ids })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || 'Could not delete campaigns.');
+      setCampaigns(rows => rows.filter(item => !ids.includes(item.id)));
+      setStudioCampaigns(rows => rows.filter(item => !ids.includes(item.id)));
+      notify(`Deleted ${ids.length} campaign${ids.length > 1 ? 's' : ''}.`);
+      setSelectedCampaignIds(new Set());
+      setBatchDeleteOpen(false);
+    } catch (error) {
+      notify(error.message || 'Could not delete campaigns.');
+    } finally {
+      setBatchBusy(false);
+    }
+  };
+
   return <ThemeProvider theme={theme}>
     <CssBaseline />
-    <AppBar position="sticky" color="inherit" elevation={0} sx={{ borderBottom: 1, borderColor: 'divider', bgcolor: 'background.paper' }}>
+    <Box sx={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', bgcolor: 'background.default' }}>
+      <AppBar position="sticky" color="inherit" elevation={0} sx={{ borderBottom: 1, borderColor: 'divider', bgcolor: 'background.paper' }}>
       <Container maxWidth="lg" disableGutters>
-        <Toolbar disableGutters sx={{ minHeight: 72, px: { xs: 2, md: 0 }, gap: 2, justifyContent: 'space-between' }}>
+        <Toolbar disableGutters sx={{ minHeight: { xs: 64, md: 72 }, px: { xs: 2, md: 0 }, gap: 2 }}>
           <Button onClick={() => setView('discover')} color="inherit" sx={{ p: 0, minWidth: 0, textAlign: 'left', '&:hover': { bgcolor: 'transparent' } }}>
             <Stack direction="row" alignItems="center" spacing={1.15}>
               <Box sx={{ width: 34, height: 34, borderRadius: 1.5, bgcolor: 'primary.main', color: 'primary.contrastText', display: 'grid', placeItems: 'center' }}><AutoAwesome sx={{ fontSize: 19 }} /></Box>
               <Box><Typography sx={{ fontWeight: 780, fontSize: 18, letterSpacing: '-.04em', lineHeight: 1.1 }}>dropnote</Typography><Typography sx={{ fontSize: 10, color: 'text.secondary', letterSpacing: '.09em', textTransform: 'uppercase', mt: .25 }}>Creator drops</Typography></Box>
             </Stack>
           </Button>
-          <Stack direction="row" alignItems="center" spacing={{ xs: .25, sm: .75 }}>
-            <Button size="small" color={view === 'discover' ? 'primary' : 'inherit'} variant={view === 'discover' ? 'contained' : 'text'} onClick={() => setView('discover')}>Discover</Button>
-            <Button size="small" color={view === 'studio' ? 'primary' : 'inherit'} variant={view === 'studio' ? 'contained' : 'text'} onClick={enterStudio}>Studio</Button>
+          <Box sx={{ display: { xs: 'none', md: 'flex' }, alignItems: 'center', gap: .5, p: .5, borderRadius: 99, bgcolor: 'action.hover' }}>
+            <NavTab active={view === 'discover'} onClick={() => setView('discover')}>Discover</NavTab>
+            <NavTab active={view === 'studio'} onClick={enterStudio}>Studio</NavTab>
+          </Box>
+          <Box sx={{ flex: 1 }} />
+          <Stack direction="row" alignItems="center" spacing={.25}>
+            <Tooltip title="View source on GitHub">
+              <IconButton component="a" href={repositoryUrl} target="_blank" rel="noreferrer" aria-label="View source on GitHub" size="small" sx={{ display: { xs: 'none', md: 'inline-flex' }, width: 36, height: 36, color: 'text.secondary' }}>
+                <GitHub fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title={`Theme: ${mode === 'system' ? 'System' : mode === 'light' ? 'Light' : 'Dark'}`}>
+              <IconButton aria-label="Color theme" aria-haspopup="menu" onClick={e => setThemeAnchor(e.currentTarget)} size="small" sx={{ width: 36, height: 36, color: 'text.secondary' }}>
+                {mode === 'system' ? <BrightnessAuto fontSize="small" /> : mode === 'light' ? <LightMode fontSize="small" /> : <DarkMode fontSize="small" />}
+              </IconButton>
+            </Tooltip>
             {currentUser && <>
-              <Tooltip title={currentUser.email}><IconButton aria-label="Account menu" onClick={e => setAccountAnchor(e.currentTarget)} size="small"><Avatar sx={{ width: 30, height: 30, fontSize: 12, bgcolor: 'action.hover', color: 'text.primary' }}>{currentUser.email.slice(0, 1).toUpperCase()}</Avatar></IconButton></Tooltip>
+              <Divider orientation="vertical" flexItem sx={{ display: { xs: 'none', md: 'block' }, my: 1.5, mx: .75 }} />
+              <Tooltip title={currentUser.email}><IconButton aria-label="Account menu" onClick={e => setAccountAnchor(e.currentTarget)} size="small" sx={{ display: { xs: 'none', md: 'inline-flex' } }}><Avatar sx={{ width: 30, height: 30, fontSize: 12, bgcolor: 'action.hover', color: 'text.primary' }}>{currentUser.email.slice(0, 1).toUpperCase()}</Avatar></IconButton></Tooltip>
               <Menu anchorEl={accountAnchor} open={Boolean(accountAnchor)} onClose={() => setAccountAnchor(null)} MenuListProps={{ 'aria-label': 'Account options' }}>
                 <MenuItem disabled>{currentUser.email}</MenuItem><Divider /><MenuItem onClick={() => { setAccountAnchor(null); signOut(); }}>Sign out</MenuItem>
               </Menu>
             </>}
-            <Tooltip title={`Theme: ${mode === 'system' ? 'System' : mode === 'light' ? 'Light' : 'Dark'}`}>
-              <IconButton aria-label="Color theme" aria-haspopup="menu" onClick={e => setThemeAnchor(e.currentTarget)} size="small" sx={{ ml: { xs: .25, sm: .75 }, width: 36, height: 36, color: 'text.secondary' }}>
-                {mode === 'system' ? <BrightnessAuto fontSize="small" /> : mode === 'light' ? <LightMode fontSize="small" /> : <DarkMode fontSize="small" />}
+            <Tooltip title="Open menu">
+              <IconButton aria-label="Open navigation menu" aria-haspopup="menu" onClick={e => setMobileNavAnchor(e.currentTarget)} size="small" sx={{ display: { xs: 'inline-flex', md: 'none' }, width: 36, height: 36, color: 'text.secondary' }}>
+                <MenuIcon fontSize="small" />
               </IconButton>
             </Tooltip>
+            <Menu anchorEl={mobileNavAnchor} open={Boolean(mobileNavAnchor)} onClose={() => setMobileNavAnchor(null)} MenuListProps={{ 'aria-label': 'Site navigation' }} PaperProps={{ sx: { minWidth: 210 } }}>
+              <MenuItem selected={view === 'discover'} onClick={() => { setMobileNavAnchor(null); setView('discover'); }}>Discover</MenuItem>
+              <MenuItem selected={view === 'studio'} onClick={() => { setMobileNavAnchor(null); enterStudio(); }}>Studio</MenuItem>
+              <Divider />
+              <MenuItem component="a" href={repositoryUrl} target="_blank" rel="noreferrer">Source on GitHub</MenuItem>
+              {currentUser && <><Divider /><MenuItem disabled>{currentUser.email}</MenuItem><MenuItem onClick={() => { setMobileNavAnchor(null); signOut(); }}>Sign out</MenuItem></>}
+            </Menu>
             <Menu anchorEl={themeAnchor} open={Boolean(themeAnchor)} onClose={() => setThemeAnchor(null)} MenuListProps={{ 'aria-label': 'Choose color theme' }}>
               <MenuItem selected={mode === 'system'} onClick={() => { setMode('system'); setThemeAnchor(null); }}>System</MenuItem>
               <MenuItem selected={mode === 'light'} onClick={() => { setMode('light'); setThemeAnchor(null); }}>Light</MenuItem>
@@ -387,7 +523,8 @@ function App() {
       </Container>
     </AppBar>
 
-    <Container maxWidth="lg" sx={{ px: { xs: 2, md: 0 }, pb: 7 }}>
+    <Box component="main" sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column' }}>
+      <Container maxWidth="lg" sx={{ px: { xs: 2, md: 0 }, pb: 7, flexGrow: 1, display: 'flex', flexDirection: 'column' }}>
       {view === 'discover' && <>
         {campaignLinkNotice && <Alert severity="warning" sx={{ mt: 2 }}>{campaignLinkNotice}</Alert>}
         <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1.2fr .8fr' }, gap: { xs: 4, md: 7 }, alignItems: 'center', py: { xs: 5, md: 7 } }}>
@@ -424,10 +561,10 @@ function App() {
       </>}
 
       {view === 'studio' && !currentUser && <>
-        <PageHeading eyebrow="Creator workspace" title="Sign in to Studio" description="Sign in to manage your creator campaigns. Creator access is by invitation only." action={<Button variant="contained" onClick={() => { setAuthMode('login'); setAuthOpen(true); }}>Sign in</Button>} />
+        <PageHeading eyebrow="Creator workspace" title="Sign in to Studio" description="Sign in to manage your creator campaigns." action={<Button variant="contained" onClick={() => { setAuthMode('login'); setAuthOpen(true); }}>Sign in</Button>} />
         <Paper variant="outlined" sx={{ p: { xs: 3, md: 5 }, maxWidth: 680, borderRadius: 3 }}>
           <Typography variant="h5" fontWeight={700}>Your campaigns, in one place</Typography>
-          <Typography color="text.secondary" sx={{ mt: 1, maxWidth: 540 }}>Create resource drops, set claim limits and end dates, and see campaign activity. Ask your Dropnote administrator for an invitation if you need an account.</Typography>
+          <Typography color="text.secondary" sx={{ mt: 1, maxWidth: 540 }}>Create resource drops, set claim limits and end dates, and see campaign activity.</Typography>
           <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25} sx={{ mt: 2.5 }}>
             <Button variant="contained" onClick={() => { setAuthMode('login'); setAuthError(''); setAuthOpen(true); }}>Sign in</Button>
           </Stack>
@@ -435,7 +572,7 @@ function App() {
       </>}
 
       {view === 'studio' && currentUser && <>
-        <PageHeading eyebrow={currentUser.role === 'admin' ? 'Administrator' : 'Creator workspace'} title="Studio" description={currentUser.role === 'admin' ? 'Review campaigns across creator accounts.' : 'Manage your resource campaigns and see how they’re doing.'} action={<Stack direction="row" spacing={1} alignItems="center">{currentUser.role === 'admin' && <Button variant="outlined" onClick={() => { setInviteOpen(true); setInviteError(''); setInviteEmail(''); setInviteUrl(''); }}>Invite creator</Button>}<Button variant="contained" startIcon={<Add />} onClick={openNewCampaign}>New campaign</Button></Stack>} />
+        <PageHeading eyebrow={currentUser.role === 'admin' ? 'Administrator' : 'Creator workspace'} title="Studio" description={currentUser.role === 'admin' ? 'Review campaigns across creator accounts.' : 'Manage your resource campaigns and see how they’re doing.'} action={<Button variant="contained" startIcon={<Add />} onClick={openNewCampaign}>New campaign</Button>} />
         {currentUser.role === 'admin' && <Alert severity="info" variant="outlined" sx={{ mb: 2, borderColor: 'divider' }}>Administrator access is configured on the server with DROPNOTE_ADMIN_EMAIL and DROPNOTE_ADMIN_PASSWORD environment variables.</Alert>}
         <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(3, 1fr)' }, gap: 1.5, mb: 3 }}>
           <Metric label="Campaigns" value={studioCampaigns.filter(c => c.status === 'Live').length} note="Visible in this workspace" icon={<Campaign fontSize="small" />} />
@@ -443,20 +580,246 @@ function App() {
           <Metric label="Channels" value={new Set(studioCampaigns.map(c => c.channel)).size} note="In this workspace" icon={<YouTube fontSize="small" />} />
         </Box>
         <Paper variant="outlined" sx={{ borderRadius: 3, overflow: 'hidden' }}>
-          <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between" spacing={1.5} sx={{ px: 2.5, py: 2 }}>
-            <Box><Typography fontWeight={720}>{currentUser.role === 'admin' ? 'All campaigns' : 'Your campaigns'}</Typography><Typography variant="caption" color="text.secondary">Filter by channel to find a specific drop.</Typography></Box>
-            <FormControl size="small" sx={{ minWidth: 185 }}><InputLabel>Channel</InputLabel><Select value={filter} label="Channel" onChange={e => setFilter(e.target.value)}>{studioChannels.map(c => <MenuItem key={c} value={c}>{c}</MenuItem>)}</Select></FormControl>
+          <Stack
+            direction={{ xs: 'column', md: 'row' }}
+            alignItems={{ xs: 'stretch', md: 'center' }}
+            justifyContent="space-between"
+            spacing={1.5}
+            sx={{
+              px: 2.5,
+              py: 1.75,
+              bgcolor: selectedCampaignIds.size > 0
+                ? (isDark ? 'rgba(255,255,255,.03)' : 'action.hover')
+                : 'inherit',
+              transition: 'background-color .15s ease'
+            }}
+          >
+            <Box>
+              <Typography fontWeight={720}>{currentUser.role === 'admin' ? 'All campaigns' : 'Your campaigns'}</Typography>
+              <Typography variant="caption" color="text.secondary">
+                {selectedCampaignIds.size > 0
+                  ? `${selectedCampaignIds.size} of ${filteredStudioCampaigns.length} campaigns selected`
+                  : 'Manage drops, pause or resume campaigns in bulk, or select multiple.'}
+              </Typography>
+            </Box>
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems="center">
+              {selectedCampaignIds.size === 0 ? (
+                <>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="inherit"
+                    startIcon={<Pause sx={{ fontSize: 16 }} />}
+                    disabled={batchBusy || !filteredStudioCampaigns.some(c => c.status === 'Live')}
+                    onClick={() => handleBatchStatus('Paused', null)}
+                    sx={{
+                      borderColor: 'divider',
+                      color: 'text.primary',
+                      fontWeight: 600,
+                      fontSize: 13,
+                      '&:hover': { borderColor: 'text.secondary', bgcolor: 'action.hover' }
+                    }}
+                  >
+                    Pause all
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="inherit"
+                    startIcon={<PlayArrow sx={{ fontSize: 16 }} />}
+                    disabled={batchBusy || !filteredStudioCampaigns.some(c => c.status !== 'Live')}
+                    onClick={() => handleBatchStatus('Live', null)}
+                    sx={{
+                      borderColor: 'divider',
+                      color: 'text.primary',
+                      fontWeight: 600,
+                      fontSize: 13,
+                      '&:hover': { borderColor: 'text.secondary', bgcolor: 'action.hover' }
+                    }}
+                  >
+                    Resume all
+                  </Button>
+                  <FormControl size="small" sx={{ minWidth: 175 }}>
+                    <InputLabel>Channel</InputLabel>
+                    <Select value={filter} label="Channel" onChange={e => { setFilter(e.target.value); setSelectedCampaignIds(new Set()); }}>
+                      {studioChannels.map(c => <MenuItem key={c} value={c}>{c}</MenuItem>)}
+                    </Select>
+                  </FormControl>
+                </>
+              ) : (
+                <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap', gap: 1 }}>
+                  <Chip
+                    label={`${selectedCampaignIds.size} selected`}
+                    size="small"
+                    variant="outlined"
+                    sx={{
+                      fontWeight: 650,
+                      fontSize: 12,
+                      borderColor: 'divider',
+                      bgcolor: 'background.paper',
+                      color: 'text.primary',
+                      px: 0.5
+                    }}
+                  />
+                  <Divider orientation="vertical" flexItem sx={{ my: 0.5, mx: 0.25, display: { xs: 'none', sm: 'block' } }} />
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="inherit"
+                    startIcon={<Pause sx={{ fontSize: 16 }} />}
+                    disabled={batchBusy}
+                    onClick={() => handleBatchStatus('Paused', Array.from(selectedCampaignIds))}
+                    sx={{
+                      borderColor: 'divider',
+                      bgcolor: 'background.paper',
+                      color: 'text.primary',
+                      fontWeight: 600,
+                      fontSize: 13,
+                      '&:hover': { borderColor: 'text.secondary', bgcolor: 'action.hover' }
+                    }}
+                  >
+                    Pause
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="inherit"
+                    startIcon={<PlayArrow sx={{ fontSize: 16 }} />}
+                    disabled={batchBusy}
+                    onClick={() => handleBatchStatus('Live', Array.from(selectedCampaignIds))}
+                    sx={{
+                      borderColor: 'divider',
+                      bgcolor: 'background.paper',
+                      color: 'text.primary',
+                      fontWeight: 600,
+                      fontSize: 13,
+                      '&:hover': { borderColor: 'text.secondary', bgcolor: 'action.hover' }
+                    }}
+                  >
+                    Resume
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="inherit"
+                    startIcon={<DeleteOutline sx={{ fontSize: 16 }} />}
+                    disabled={batchBusy}
+                    onClick={() => setBatchDeleteOpen(true)}
+                    sx={{
+                      borderColor: isDark ? 'rgba(255,100,100,0.25)' : '#e5c2c2',
+                      bgcolor: 'background.paper',
+                      color: isDark ? '#ff9b9b' : '#b23434',
+                      fontWeight: 600,
+                      fontSize: 13,
+                      '&:hover': {
+                        borderColor: isDark ? '#ff8080' : '#a32424',
+                        bgcolor: isDark ? 'rgba(255,100,100,0.08)' : 'rgba(200,50,50,0.05)'
+                      }
+                    }}
+                  >
+                    Delete
+                  </Button>
+                  <Button
+                    size="small"
+                    color="inherit"
+                    onClick={() => setSelectedCampaignIds(new Set())}
+                    sx={{
+                      color: 'text.secondary',
+                      fontWeight: 500,
+                      fontSize: 13,
+                      '&:hover': { color: 'text.primary', bgcolor: 'action.hover' }
+                    }}
+                  >
+                    Deselect
+                  </Button>
+                </Stack>
+              )}
+            </Stack>
           </Stack>
           <Divider />
-          {filteredStudioCampaigns.length ? filteredStudioCampaigns.map((c, i) => <Box key={c.id} sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'minmax(220px, 1.5fr) minmax(160px, 1fr)', md: 'minmax(220px, 1.6fr) minmax(150px, 1fr) minmax(120px, .7fr) 112px' }, gap: 2, alignItems: 'center', px: 2.5, py: 2, borderBottom: i < filteredStudioCampaigns.length - 1 ? 1 : 0, borderColor: 'divider' }}>
-            <Stack direction="row" alignItems="center" spacing={1.5}>{youtubeVideoId(c.video) ? <Box component="img" src={`https://i.ytimg.com/vi/${youtubeVideoId(c.video)}/hqdefault.jpg`} alt={`${c.title} video thumbnail`} loading="lazy" onError={e => { e.currentTarget.style.display = 'none'; }} sx={{ width: 64, height: 42, flexShrink: 0, borderRadius: 1.25, bgcolor: 'action.hover', objectFit: 'cover' }} /> : <Avatar variant="rounded" sx={{ width: 42, height: 42, bgcolor: 'action.hover', color: 'text.secondary', fontSize: 13, fontWeight: 700 }}>{c.initials}</Avatar>}<Box sx={{ minWidth: 0 }}><Typography variant="body2" fontWeight={700}>{c.title}</Typography><Typography variant="caption" color="text.secondary">{c.channel} · {c.category}</Typography></Box></Stack>
-            <Box><Stack direction="row" justifyContent="space-between" sx={{ mb: .6 }}><Typography variant="caption" color="text.secondary">Claims</Typography><Typography variant="caption" fontWeight={650}>{c.claimed}{c.limit ? ` / ${c.limit}` : ''}</Typography></Stack><LinearProgress variant="determinate" value={c.limit ? progress(c) : Math.min(100, c.claimed)} sx={{ height: 5, borderRadius: 5, bgcolor: 'action.hover' }} /></Box>
-            <Stack direction="row" spacing={.7} alignItems="center" color="text.secondary"><CalendarMonth sx={{ fontSize: 15 }} /><Typography variant="caption">Ends {c.ends}</Typography></Stack>
-            <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ width: '100%' }}><Chip size="small" label={c.status} variant="outlined" /><Tooltip title="Campaign actions"><IconButton aria-label={`Actions for ${c.title}`} size="small" onClick={e => { setCampaignMenuAnchor(e.currentTarget); setMenuCampaign(c); }}><MoreHoriz fontSize="small" /></IconButton></Tooltip></Stack>
-          </Box>) : <Box sx={{ p: 4, textAlign: 'center' }}><Typography fontWeight={650}>No campaigns yet</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>Create your first resource drop to get started.</Typography><Button sx={{ mt: 1.5 }} startIcon={<Add />} onClick={openNewCampaign}>Create a campaign</Button></Box>}
+          {filteredStudioCampaigns.length ? (
+            <>
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '42px 1fr', sm: '42px minmax(200px, 1.5fr) minmax(130px, 1fr)', md: '42px minmax(200px, 1.6fr) minmax(130px, 1fr) minmax(110px, .7fr) 112px' }, gap: 2, alignItems: 'center', px: 2, py: 1, bgcolor: 'action.hover', borderBottom: 1, borderColor: 'divider' }}>
+                <Checkbox
+                  size="small"
+                  checked={isAllSelected}
+                  indeterminate={isSomeSelected}
+                  onChange={toggleSelectAll}
+                  inputProps={{ 'aria-label': 'Select all campaigns' }}
+                  sx={{ p: 0.5, color: 'text.secondary', '&.Mui-checked': { color: 'primary.main' } }}
+                />
+                <Typography variant="caption" fontWeight={700} color="text.secondary">CAMPAIGN</Typography>
+                <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ display: { xs: 'none', sm: 'block' } }}>CLAIMS</Typography>
+                <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ display: { xs: 'none', md: 'block' } }}>END DATE</Typography>
+                <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ display: { xs: 'none', md: 'block' }, textAlign: 'right', pr: 1 }}>STATUS</Typography>
+              </Box>
+              {filteredStudioCampaigns.map((c, i) => (
+                <Box
+                  key={c.id}
+                  sx={{
+                    display: 'grid',
+                    gridTemplateColumns: { xs: '42px 1fr', sm: '42px minmax(200px, 1.5fr) minmax(130px, 1fr)', md: '42px minmax(200px, 1.6fr) minmax(130px, 1fr) minmax(110px, .7fr) 112px' },
+                    gap: 2,
+                    alignItems: 'center',
+                    px: 2,
+                    py: 2,
+                    bgcolor: selectedCampaignIds.has(c.id) ? (isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.025)') : 'inherit',
+                    borderBottom: i < filteredStudioCampaigns.length - 1 ? 1 : 0,
+                    borderColor: 'divider',
+                    transition: 'background-color .15s'
+                  }}
+                >
+                  <Checkbox
+                    size="small"
+                    checked={selectedCampaignIds.has(c.id)}
+                    onChange={() => toggleSelectCampaign(c.id)}
+                    inputProps={{ 'aria-label': `Select ${c.title}` }}
+                    sx={{ p: 0.5, color: 'text.secondary', '&.Mui-checked': { color: 'primary.main' } }}
+                  />
+                  <Stack direction="row" alignItems="center" spacing={1.5}>
+                    {youtubeVideoId(c.video) ? (
+                      <Box component="img" src={`https://i.ytimg.com/vi/${youtubeVideoId(c.video)}/hqdefault.jpg`} alt={`${c.title} video thumbnail`} loading="lazy" onError={e => { e.currentTarget.style.display = 'none'; }} sx={{ width: 64, height: 42, flexShrink: 0, borderRadius: 1.25, bgcolor: 'action.hover', objectFit: 'cover' }} />
+                    ) : (
+                      <Avatar variant="rounded" sx={{ width: 42, height: 42, bgcolor: 'action.hover', color: 'text.secondary', fontSize: 13, fontWeight: 700 }}>{c.initials}</Avatar>
+                    )}
+                    <Box sx={{ minWidth: 0 }}>
+                      <Typography variant="body2" fontWeight={700}>{c.title}</Typography>
+                      <Typography variant="caption" color="text.secondary">{c.channel} · {c.category}</Typography>
+                    </Box>
+                  </Stack>
+                  <Box>
+                    <Stack direction="row" justifyContent="space-between" sx={{ mb: .6 }}>
+                      <Typography variant="caption" color="text.secondary">Claims</Typography>
+                      <Typography variant="caption" fontWeight={650}>{c.claimed}{c.limit ? ` / ${c.limit}` : ''}</Typography>
+                    </Stack>
+                    <LinearProgress variant="determinate" value={c.limit ? progress(c) : Math.min(100, c.claimed)} sx={{ height: 5, borderRadius: 5, bgcolor: 'action.hover' }} />
+                  </Box>
+                  <Stack direction="row" spacing={.7} alignItems="center" color="text.secondary">
+                    <CalendarMonth sx={{ fontSize: 15 }} />
+                    <Typography variant="caption">Ends {c.ends}</Typography>
+                  </Stack>
+                  <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ width: '100%' }}>
+                    <Chip size="small" label={c.status} color={c.status === 'Live' ? 'primary' : 'default'} variant="outlined" sx={{ fontWeight: 600 }} />
+                    <Tooltip title="Campaign actions">
+                      <IconButton aria-label={`Actions for ${c.title}`} size="small" onClick={e => { setCampaignMenuAnchor(e.currentTarget); setMenuCampaign(c); }}>
+                        <MoreHoriz fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  </Stack>
+                </Box>
+              ))}
+            </>
+          ) : (
+            <Box sx={{ p: 4, textAlign: 'center' }}>
+              <Typography fontWeight={650}>No campaigns yet</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>Create your first resource drop to get started.</Typography>
+              <Button sx={{ mt: 1.5 }} startIcon={<Add />} onClick={openNewCampaign}>Create a campaign</Button>
+            </Box>
+          )}
         </Paper>
       </>}
-    </Container>
+      </Container>
+    </Box>
 
     <Menu anchorEl={campaignMenuAnchor} open={Boolean(campaignMenuAnchor)} onClose={() => { setCampaignMenuAnchor(null); setMenuCampaign(null); }}>
       <MenuItem onClick={copyCampaignLink}>Copy campaign link</MenuItem>
@@ -469,8 +832,46 @@ function App() {
       <DialogContent><Typography variant="body2" color="text.secondary">“{deleteCampaign?.title}” and its claim records will be permanently deleted. This can’t be undone.</Typography></DialogContent>
       <DialogActions sx={{ p: 2 }}><Button onClick={() => setDeleteCampaign(null)}>Cancel</Button><Button color="error" variant="contained" onClick={confirmDeleteCampaign}>Delete</Button></DialogActions>
     </Dialog>
+    <Dialog
+      open={batchDeleteOpen}
+      onClose={() => setBatchDeleteOpen(false)}
+      fullWidth
+      maxWidth="xs"
+      PaperProps={{
+        variant: 'outlined',
+        sx: {
+          borderRadius: 3,
+          borderColor: 'divider',
+          bgcolor: 'background.paper'
+        }
+      }}
+    >
+      <DialogTitle sx={{ fontWeight: 720 }}>Delete {selectedCampaignIds.size} campaigns?</DialogTitle>
+      <DialogContent>
+        <Typography variant="body2" color="text.secondary">
+          The selected {selectedCampaignIds.size} campaigns and all their claim records will be permanently deleted. This action cannot be undone.
+        </Typography>
+      </DialogContent>
+      <DialogActions sx={{ p: 2, pt: 1 }}>
+        <Button onClick={() => setBatchDeleteOpen(false)} color="inherit" sx={{ fontWeight: 600 }}>Cancel</Button>
+        <Button
+          variant="contained"
+          disabled={batchBusy}
+          onClick={confirmBatchDelete}
+          sx={{
+            bgcolor: isDark ? '#b83b3b' : '#b23434',
+            color: '#ffffff',
+            fontWeight: 650,
+            '&:hover': { bgcolor: isDark ? '#a32f2f' : '#992828' }
+          }}
+        >
+          {batchBusy ? 'Deleting…' : `Delete (${selectedCampaignIds.size})`}
+        </Button>
+      </DialogActions>
+    </Dialog>
 
-    <Box component="footer" sx={{ borderTop: 1, borderColor: 'divider', bgcolor: 'background.paper' }}><Container maxWidth="lg" sx={{ px: { xs: 2, md: 0 }, py: 2.25, display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1 }}><Typography variant="caption" color="text.secondary">© 2026 Dropnote</Typography><Typography variant="caption" color="text.secondary">A simple prototype for creator communities</Typography></Container></Box>
+    <Box component="footer" sx={{ borderTop: 1, borderColor: 'divider', bgcolor: 'background.paper', mt: 'auto' }}><Container maxWidth="lg" sx={{ px: { xs: 2, md: 0 }, py: 1.75, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 1 }}><Typography variant="caption" color="text.secondary">© 2026 Dropnote</Typography><Stack direction="row" spacing={2} alignItems="center"><Typography variant="caption" color="text.secondary" sx={{ display: { xs: 'none', sm: 'block' } }}>A simple prototype for creator communities</Typography><Button component="a" href={repositoryUrl} target="_blank" rel="noreferrer" size="small" color="inherit" startIcon={<GitHub sx={{ fontSize: '18px !important' }} />} sx={{ px: .5, minWidth: 0, color: 'text.secondary', fontSize: 12, textTransform: 'none' }}>Source on GitHub</Button></Stack></Container></Box>
+  </Box>
 
     <Dialog open={authOpen} onClose={() => { if (!authBusy) { setAuthOpen(false); setAuthError(''); } }} fullWidth maxWidth="xs" PaperProps={{ sx: { borderRadius: 3 } }}>
       <Box component="form" onSubmit={submitAuth}>
@@ -493,38 +894,292 @@ function App() {
     </Dialog>
 
     <Dialog open={Boolean(selected)} onClose={closeClaim} fullWidth maxWidth="sm" PaperProps={{ tabIndex: -1, sx: { borderRadius: 3, '&:focus': { outline: 'none' }, '&:focus-visible': { outline: '2px solid', outlineColor: 'divider', outlineOffset: '-2px' } } }}>
-      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, fontWeight: 720, pb: 1 }}>{claimStep < 3 && <IconButton size="small" aria-label="Back" onClick={() => claimStep === 2 ? setClaimStep(1) : closeClaim()}><ArrowBack fontSize="small" /></IconButton>}{claimStep === 1 ? 'Get this drop' : claimStep === 2 ? 'Check your comment' : 'Your resource is ready'}</DialogTitle>
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, fontWeight: 720, pb: 1 }}>{claimStep !== 'unavailable' && claimStep < 3 && <IconButton size="small" aria-label="Back" onClick={() => claimStep === 2 ? setClaimStep(1) : closeClaim()}><ArrowBack fontSize="small" /></IconButton>}{claimStep === 'unavailable' ? 'Drop details' : claimStep === 1 ? 'Get this drop' : claimStep === 2 ? 'Check your comment' : 'Your resource is ready'}</DialogTitle>
       <DialogContent dividers>
         {selected && claimStep === 1 && <Stack spacing={2}>
-          <Chip label={selected.channel} size="small" sx={{ alignSelf: 'flex-start', bgcolor: 'action.hover' }} />
-          <Typography variant="h5" fontWeight={720}>{selected.title}</Typography>
-          <Typography color="text.secondary">{selected.description}</Typography>
-          <Button variant="outlined" startIcon={<YouTube />} endIcon={<Launch sx={{ fontSize: 15 }} />} component="a" href={selected.video} target="_blank" rel="noreferrer" sx={{ alignSelf: 'flex-start' }}>Open the video</Button>
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems="stretch">
+            {youtubeVideoId(selected.video) && (
+              <Box
+                component="a"
+                href={selected.video}
+                target="_blank"
+                rel="noreferrer"
+                sx={{
+                  position: 'relative',
+                  width: { xs: '100%', sm: 180, md: 200 },
+                  aspectRatio: { xs: '16 / 9', sm: 'unset' },
+                  alignSelf: 'stretch',
+                  minHeight: { sm: 120 },
+                  flexShrink: 0,
+                  display: 'grid',
+                  placeItems: 'center',
+                  overflow: 'hidden',
+                  borderRadius: 2,
+                  bgcolor: 'action.hover',
+                  border: 1,
+                  borderColor: 'divider',
+                  textDecoration: 'none',
+                  cursor: 'pointer',
+                  transition: 'border-color .18s',
+                  '&:hover': { borderColor: 'primary.main' },
+                  '&:hover .play-overlay': { transform: 'scale(1.1)', bgcolor: 'rgba(0,0,0,0.8)' },
+                }}
+              >
+                <Box
+                  component="img"
+                  src={`https://i.ytimg.com/vi/${youtubeVideoId(selected.video)}/hqdefault.jpg`}
+                  alt={`${selected.title} video thumbnail`}
+                  loading="lazy"
+                  onError={e => { e.currentTarget.style.display = 'none'; }}
+                  sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }}
+                />
+                <Box
+                  className="play-overlay"
+                  sx={{
+                    position: 'relative',
+                    zIndex: 1,
+                    width: 38,
+                    height: 38,
+                    borderRadius: '50%',
+                    bgcolor: 'rgba(0,0,0,0.6)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    boxShadow: 2,
+                    transition: 'transform .18s, background-color .18s',
+                  }}
+                >
+                  <YouTube sx={{ color: '#fff', fontSize: 22 }} />
+                </Box>
+              </Box>
+            )}
+            <Box sx={{ minWidth: 0, flexGrow: 1, display: 'flex', flexDirection: 'column' }}>
+              <Chip label={selected.channel} size="small" sx={{ alignSelf: 'flex-start', mb: 1, bgcolor: 'action.hover' }} />
+              <Typography variant="h6" fontWeight={720} sx={{ lineHeight: 1.3 }}>{selected.title}</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{selected.description}</Typography>
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={<YouTube />}
+                endIcon={<Launch sx={{ fontSize: 13 }} />}
+                component="a"
+                href={selected.video}
+                target="_blank"
+                rel="noreferrer"
+                sx={{ alignSelf: 'flex-start', mt: 'auto', pt: 0.6, pb: 0.6 }}
+              >
+                Open video
+              </Button>
+            </Box>
+          </Stack>
           <Divider />
           <Box><Typography variant="body2" fontWeight={700}>Write your comment</Typography><Typography variant="caption" color="text.secondary">A comment is required. Say it in your own words; nothing is prefilled.</Typography></Box>
           <TextField label="Your comment" placeholder="Write your comment in your own words…" value={commentText} onChange={e => setCommentText(e.target.value)} multiline minRows={4} maxRows={6} required fullWidth helperText="Required. A unique claim sentence is appended when you copy." />
-          <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, bgcolor: 'action.hover' }}><Typography variant="caption" color="text.secondary">Your claim sentence</Typography><Stack alignItems="flex-start" spacing={1.5} sx={{ mt: .75 }}><Typography sx={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontWeight: 720, overflowWrap: 'anywhere' }}>{claimCode}</Typography><Button size="small" variant="contained" startIcon={<ContentCopy />} sx={{ alignSelf: 'flex-start', whiteSpace: 'nowrap' }} onClick={() => copyComment(true)} disabled={!commentText.trim()}>Copy comment + continue</Button></Stack></Paper>
-          <Typography variant="caption" color="text.secondary">This generated sentence is only a claim code, not a crypto wallet key or recovery phrase. Never use it to secure a wallet.</Typography>
+          <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, bgcolor: 'action.hover' }}>
+            <Typography variant="caption" color="text.secondary">Your claim sentence</Typography>
+            <Stack alignItems="flex-start" spacing={1.5} sx={{ mt: .75 }}>
+              <Typography sx={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontWeight: 720, overflowWrap: 'anywhere' }}>{claimCode}</Typography>
+              <Button size="small" variant="contained" startIcon={<ContentCopy />} sx={{ alignSelf: 'flex-start', whiteSpace: 'nowrap' }} onClick={() => copyComment(true)} disabled={!commentText.trim()}>Copy comment + continue</Button>
+            </Stack>
+          </Paper>
+          <Alert
+            icon={<AccessTime fontSize="small" />}
+            severity="info"
+            variant="outlined"
+            sx={{
+              borderColor: 'divider',
+              bgcolor: 'action.hover',
+              color: 'text.secondary',
+              py: 0.5,
+              borderRadius: 2,
+              '& .MuiAlert-icon': { color: 'text.primary' }
+            }}
+          >
+            <Typography variant="caption" sx={{ display: 'block', color: 'text.primary', fontWeight: 650, mb: 0.25 }}>
+              Post and verify promptly
+            </Typography>
+            <Typography variant="caption">
+              Dropnote scans recent comments on the video. Post your comment on YouTube and return here right away so it stays within the active scan window.
+            </Typography>
+          </Alert>
         </Stack>}
         {selected && claimStep === 2 && <Stack spacing={2}>
-          <Alert severity="info">Paste the copied text as a comment on <b>{selected.channel}</b>’s YouTube video. Then return here and click <b>Check my comment</b>.</Alert>
-          <Button variant="outlined" startIcon={<YouTube />} endIcon={<Launch sx={{ fontSize: 15 }} />} component="a" href={selected.video} target="_blank" rel="noreferrer" sx={{ alignSelf: 'flex-start' }}>Open the video</Button>
-          <Typography variant="body2" color="text.secondary">We’ll look through recent public comments for your sentence. YouTube may limit or change comment access, so verification can sometimes fail.</Typography>
-          <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, bgcolor: 'action.hover' }}><Typography variant="caption" color="text.secondary">Sentence to find</Typography><Stack direction="column" alignItems="flex-start" spacing={1.5} sx={{ mt: .75 }}><Typography sx={{ minWidth: 0, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontWeight: 720, overflowWrap: 'anywhere' }}>{claimCode}</Typography><Button size="small" startIcon={<ContentCopy />} sx={{ alignSelf: 'flex-start', px: 0 }} onClick={() => copyComment(false)} disabled={!commentText.trim()}>Copy again</Button></Stack></Paper>
-          {verifyError && <Alert severity="error">{verifyError}</Alert>}
+          <Alert
+            icon={<InfoOutlined fontSize="small" />}
+            severity="info"
+            variant="outlined"
+            sx={{
+              borderColor: 'divider',
+              bgcolor: 'action.hover',
+              color: 'text.secondary',
+              borderRadius: 2,
+              '& .MuiAlert-icon': { color: 'text.primary' }
+            }}
+          >
+            <Typography variant="body2" sx={{ color: 'text.primary', fontWeight: 650, mb: 0.35 }}>
+              Post your comment, then verify immediately
+            </Typography>
+            <Typography variant="caption">
+              Open <b>{selected.channel}</b>’s video, paste your copied text as a comment, and return here promptly to click <b>Check my comment</b> before newer comments appear.
+            </Typography>
+          </Alert>
+
+          <Button
+            variant="outlined"
+            startIcon={<YouTube />}
+            endIcon={<Launch sx={{ fontSize: 14 }} />}
+            component="a"
+            href={selected.video}
+            target="_blank"
+            rel="noreferrer"
+            sx={{ alignSelf: 'flex-start', borderColor: 'divider', color: 'text.primary', '&:hover': { borderColor: 'text.secondary' } }}
+          >
+            Open video on YouTube
+          </Button>
+
+          <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, bgcolor: 'background.paper', borderColor: 'divider' }}>
+            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+              <Typography variant="caption" color="text.secondary" fontWeight={650}>CLAIM SENTENCE TO MATCH</Typography>
+              <Button size="small" startIcon={<ContentCopy sx={{ fontSize: 14 }} />} onClick={() => copyComment(false)} disabled={!commentText.trim()} sx={{ fontSize: 12, py: 0.25, px: 1 }}>
+                Copy again
+              </Button>
+            </Stack>
+            <Typography sx={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 13, fontWeight: 700, color: 'text.primary', overflowWrap: 'anywhere', bgcolor: 'action.hover', p: 1.5, borderRadius: 1.5, border: 1, borderColor: 'divider' }}>
+              {claimCode}
+            </Typography>
+          </Paper>
+
+          {verifyError && (
+            <Alert
+              severity="error"
+              variant="outlined"
+              sx={{ borderRadius: 2, borderColor: isDark ? 'rgba(255,100,100,0.3)' : '#f0c0c0' }}
+            >
+              <Typography variant="body2" fontWeight={650}>{verifyError}</Typography>
+              <Typography variant="caption" sx={{ display: 'block', mt: 0.5, opacity: 0.85 }}>
+                Tip: If you posted a few minutes ago, newer comments on the video may have pushed yours outside the scan window. Post a fresh comment and click Check my comment immediately.
+              </Typography>
+            </Alert>
+          )}
         </Stack>}
         {selected && claimStep === 3 && <Stack spacing={2} alignItems="flex-start" sx={{ py: 1 }}>
           <Avatar sx={{ bgcolor: 'action.hover', color: 'text.primary', width: 48, height: 48 }}><CheckCircle /></Avatar><Typography variant="h5" fontWeight={720}>Claim confirmed</Typography><Typography color="text.secondary">Your resource is ready to open.</Typography>
           {selected.resourceType === 'text'
             ? <Paper variant="outlined" sx={{ p: 2, width: '100%', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}><Typography variant="body2">{selected.resource}</Typography><Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap' }}><Button size="small" startIcon={<ContentCopy />} onClick={copyResourceText}>Copy text</Button><Button size="small" startIcon={<Download />} onClick={downloadResourceText}>Save as .txt</Button></Stack></Paper>
-            : <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}><Button variant="contained" endIcon={<ArrowForward />} component="a" href={selected.resource} target="_blank" rel="noreferrer">Open resource</Button><Button startIcon={<ContentCopy />} onClick={copyResourceLink}>Copy link</Button></Stack>}
-          <TextField label="Email (optional)" type="email" value={email} onChange={e => setEmail(e.target.value)} helperText="For future recovery. This prototype does not send or save your email." size="small" fullWidth sx={{ '& .MuiInputBase-root': { height: 44 }, '& .MuiInputBase-input': { py: 1 }, '& .MuiFormHelperText-root': { mt: 0.5, ml: 0 } }} />
+            : <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}><Button variant="contained" endIcon={<ArrowForward />} component="a" href={selected.resource} target="_blank" rel="noreferrer">Open resource</Button><Button startIcon={<ContentCopy />} onClick={copyResourceLink}>Copy link</Button><Button startIcon={<Download />} onClick={downloadResourceText}>Download as text</Button></Stack>}
           <Alert severity="info" variant="outlined" sx={{ width: '100%', borderColor: 'divider', bgcolor: 'transparent' }}><Typography variant="caption">Nothing is stored on the server. Your unlocked link or text lives only in this browser tab's session storage, so copy or save it now if you need it later.</Typography></Alert>
         </Stack>}
+        {selected && claimStep === 'unavailable' && <Stack spacing={2.5}>
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems="stretch">
+            {youtubeVideoId(selected.video) && (
+              <Box
+                component="a"
+                href={selected.video}
+                target="_blank"
+                rel="noreferrer"
+                sx={{
+                  position: 'relative',
+                  width: { xs: '100%', sm: 180, md: 200 },
+                  aspectRatio: { xs: '16 / 9', sm: 'unset' },
+                  alignSelf: 'stretch',
+                  minHeight: { sm: 120 },
+                  flexShrink: 0,
+                  display: 'grid',
+                  placeItems: 'center',
+                  overflow: 'hidden',
+                  borderRadius: 2,
+                  bgcolor: 'action.hover',
+                  border: 1,
+                  borderColor: 'divider',
+                  textDecoration: 'none',
+                  cursor: 'pointer',
+                  transition: 'border-color .18s',
+                  '&:hover': { borderColor: 'primary.main' },
+                  '&:hover .play-overlay': { transform: 'scale(1.1)', bgcolor: 'rgba(0,0,0,0.8)' },
+                }}
+              >
+                <Box
+                  component="img"
+                  src={`https://i.ytimg.com/vi/${youtubeVideoId(selected.video)}/hqdefault.jpg`}
+                  alt={`${selected.title} video thumbnail`}
+                  loading="lazy"
+                  onError={e => { e.currentTarget.style.display = 'none'; }}
+                  sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }}
+                />
+                <Box
+                  className="play-overlay"
+                  sx={{
+                    position: 'relative',
+                    zIndex: 1,
+                    width: 38,
+                    height: 38,
+                    borderRadius: '50%',
+                    bgcolor: 'rgba(0,0,0,0.6)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    boxShadow: 2,
+                    transition: 'transform .18s, background-color .18s',
+                  }}
+                >
+                  <YouTube sx={{ color: '#fff', fontSize: 22 }} />
+                </Box>
+              </Box>
+            )}
+            <Box sx={{ minWidth: 0, flexGrow: 1, display: 'flex', flexDirection: 'column' }}>
+              <Chip label={selected.channel} size="small" sx={{ alignSelf: 'flex-start', mb: 1, bgcolor: 'action.hover' }} />
+              <Typography variant="h6" fontWeight={720} sx={{ lineHeight: 1.3 }}>{selected.title}</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{selected.description}</Typography>
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={<YouTube />}
+                endIcon={<Launch sx={{ fontSize: 13 }} />}
+                component="a"
+                href={selected.video}
+                target="_blank"
+                rel="noreferrer"
+                sx={{ alignSelf: 'flex-start', mt: 'auto', pt: 0.6, pb: 0.6 }}
+              >
+                Open video
+              </Button>
+            </Box>
+          </Stack>
+          <Divider />
+          <Alert severity="warning" variant="outlined" sx={{ borderRadius: 2 }}>
+            <Typography variant="subtitle2" fontWeight={700}>
+              {selected.limit && selected.claimed >= selected.limit
+                ? 'Claim limit reached'
+                : selected.status !== 'Live'
+                  ? `Campaign ${selected.status.toLowerCase()}`
+                  : 'Campaign ended'}
+            </Typography>
+            <Typography variant="body2" sx={{ mt: 0.5 }}>
+              {selected.limit && selected.claimed >= selected.limit
+                ? `All ${selected.limit} available drops have been claimed (${selected.claimed} / ${selected.limit}). New claims are closed, but you can still watch ${selected.channel}’s video!`
+                : selected.status !== 'Live'
+                  ? `This campaign is currently ${selected.status.toLowerCase()} and is not accepting new claims.`
+                  : `This campaign ended on ${selected.ends} and is no longer accepting new claims.`}
+            </Typography>
+          </Alert>
+          <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, bgcolor: 'action.hover' }}>
+            <Stack direction="row" justifyContent="space-between" alignItems="center">
+              <Box>
+                <Typography variant="caption" color="text.secondary">Total claims filled</Typography>
+                <Typography variant="body2" fontWeight={700}>{selected.claimed}{selected.limit ? ` / ${selected.limit}` : ''}</Typography>
+              </Box>
+              <Box textAlign="right">
+                <Typography variant="caption" color="text.secondary">Status</Typography>
+                <Box><Chip size="small" label={selected.limit && selected.claimed >= selected.limit ? 'Claimed out' : selected.status} /></Box>
+              </Box>
+            </Stack>
+          </Paper>
+        </Stack>}
       </DialogContent>
-      {(claimStep === 2 || claimStep === 3) && <DialogActions sx={{ p: 2 }}>
+      {(claimStep === 2 || claimStep === 3 || claimStep === 'unavailable') && <DialogActions sx={{ p: 2 }}>
         {claimStep === 2 && <Button variant="contained" startIcon={<CheckCircle />} disabled={verifyBusy} onClick={verifyComment}>{verifyBusy ? 'Checking…' : 'Check my comment'}</Button>}
         {claimStep === 3 && <Button onClick={closeClaim}>Done</Button>}
+        {claimStep === 'unavailable' && <Button onClick={closeClaim} variant="contained">Close</Button>}
       </DialogActions>}
     </Dialog>
 
@@ -575,24 +1230,36 @@ function Metric({ label, value, note, icon }) {
 
 function DropCard({ campaign, onOpen, progress, claimed }) {
   const videoId = youtubeVideoId(campaign.video);
+  const isAvailable = campaignIsAvailable(campaign);
+  const isCapped = Boolean(campaign.limit && campaign.claimed >= campaign.limit);
+  const statusLabel = claimed ? 'Claimed' : (isCapped ? 'Claimed out' : (campaign.status === 'Live' && !isAvailable ? 'Ended' : campaign.status));
+  const isActionable = isAvailable || claimed;
   return <Card variant="outlined" sx={{ borderRadius: 2.5, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', transition: 'border-color .18s, transform .18s', '&:hover': { borderColor: 'primary.main', transform: 'translateY(-2px)' } }}>
     <Box sx={{ position: 'relative', width: '100%', aspectRatio: '16 / 9', display: 'grid', placeItems: 'center', overflow: 'hidden', bgcolor: 'action.hover', borderBottom: 1, borderColor: 'divider' }}>
       <YouTube sx={{ color: 'text.secondary', fontSize: 32 }} />
       {videoId && <Box component="img" src={`https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`} alt={`${campaign.title} video thumbnail`} loading="lazy" onError={e => { e.currentTarget.style.display = 'none'; }} sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} />}
     </Box>
     <CardContent sx={{ p: 2.25, flexGrow: 1, display: 'flex', flexDirection: 'column' }}>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2, minHeight: 28 }}><Chip size="small" label={campaign.category} variant="outlined" sx={{ borderColor: 'divider', fontSize: 11 }} /><Typography variant="caption" color="text.secondary">{claimed ? 'Claimed' : campaign.status}</Typography></Stack>
+      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2, minHeight: 28 }}>
+        <Chip size="small" label={campaign.category} variant="outlined" sx={{ borderColor: 'divider', fontSize: 11 }} />
+        <Chip size="small" label={statusLabel} color={claimed ? 'success' : isCapped ? 'default' : isAvailable ? 'primary' : 'default'} variant="outlined" sx={{ fontSize: 11, fontWeight: 600 }} />
+      </Stack>
       <Stack direction="row" spacing={1.25} alignItems="center" sx={{ mb: 1.5, minHeight: 44 }}><Avatar sx={{ width: 37, height: 37, bgcolor: 'action.hover', color: 'text.secondary', fontWeight: 700, fontSize: 12 }}>{campaign.initials}</Avatar><Box sx={{ minWidth: 0 }}><Typography variant="body2" fontWeight={700}>{campaign.channel}</Typography>{campaign.handle && <Typography variant="caption" color="text.secondary">{campaign.handle}</Typography>}</Box></Stack>
       <Typography variant="h6" sx={{ fontSize: 18, lineHeight: 1.35, fontWeight: 700, minHeight: 49, display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden' }}>{campaign.title}</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mt: .9, lineHeight: 1.6, minHeight: 45, display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden' }}>{campaign.description}</Typography>
       <Box sx={{ mt: 'auto', pt: 1.5 }}>
-        <Stack direction="row" justifyContent="space-between" sx={{ minHeight: 20 }}><Typography variant="caption" color="text.secondary">{campaign.claimed} claimed</Typography><Typography variant="caption" color="text.secondary">{campaign.limit ? `${campaign.limit - campaign.claimed} left` : 'No cap'}</Typography></Stack>
+        <Stack direction="row" justifyContent="space-between" sx={{ minHeight: 20 }}><Typography variant="caption" color="text.secondary">{campaign.claimed} claimed</Typography><Typography variant="caption" color="text.secondary">{campaign.limit ? `${Math.max(0, campaign.limit - campaign.claimed)} left` : 'No cap'}</Typography></Stack>
         <LinearProgress variant="determinate" value={campaign.limit ? progress : 0} sx={{ mt: .75, height: 4, borderRadius: 5, bgcolor: 'action.hover' }} />
         <Stack direction="row" spacing={.65} alignItems="center" sx={{ mt: 1.5, minHeight: 24, color: 'text.secondary' }}><CalendarMonth sx={{ fontSize: 15 }} /><Typography variant="caption">{campaign.ends === 'No end date' ? 'Available until claimed' : `Ends ${campaign.ends}`}</Typography></Stack>
       </Box>
     </CardContent>
     <Divider />
-    <Box sx={{ p: 1.5, display: 'flex', justifyContent: 'flex-end' }}><Button size="small" variant="contained" onClick={onOpen}>Open drop<ArrowForward sx={{ ml: .7, fontSize: 16 }} /></Button></Box>
+    <Box sx={{ p: 1.5, display: 'flex', justifyContent: 'flex-end' }}>
+      <Button size="small" variant={isActionable ? "contained" : "outlined"} onClick={onOpen}>
+        {claimed ? 'View resource' : isAvailable ? 'Open drop' : 'View details'}
+        <ArrowForward sx={{ ml: .7, fontSize: 16 }} />
+      </Button>
+    </Box>
   </Card>;
 }
 

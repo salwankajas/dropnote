@@ -105,6 +105,30 @@ class ResourceDeliveryTests(unittest.TestCase):
         self.assertNotIn("/api/resources/upload/{file_id}", paths)
         self.assertNotIn("/api/campaigns/{campaign_id}/resource-file", paths)
 
+    def test_claim_sentence_with_single_letter_word(self):
+        self.create_campaign("link", "https://example.test/guide")
+        with patch("server.recent_comments", return_value=[{"text": "A radiant musician thinks kindly across pastures.", "channel": "ch1", "cid": "c1"}]):
+            result = server.verify_comment(VerifyRequest(campaignId="campaign-1", code="A radiant musician thinks kindly across pastures."))
+            self.assertTrue(result["verified"])
+
+    def test_batch_pause_and_resume_campaigns(self):
+        self.create_campaign("link", "https://example.test/guide")
+        admin_user = {"email": "admin@dropnote.local", "role": "admin"}
+        server.batch_update_campaign_status(server.BatchStatusPayload(campaign_ids=["campaign-1"], status="Paused"), admin_user)
+        rows = server.list_campaigns()
+        self.assertEqual(rows[0]["status"], "Paused")
+
+        server.batch_update_campaign_status(server.BatchStatusPayload(campaign_ids=[], status="Live"), admin_user)
+        rows = server.list_campaigns()
+        self.assertEqual(rows[0]["status"], "Live")
+
+    def test_batch_delete_campaigns(self):
+        self.create_campaign("link", "https://example.test/guide")
+        admin_user = {"email": "admin@dropnote.local", "role": "admin"}
+        server.batch_delete_campaigns(server.BatchDeletePayload(campaign_ids=["campaign-1"]), admin_user)
+        rows = server.list_campaigns()
+        self.assertEqual(len(rows), 0)
+
     def test_verification_request_cannot_include_email(self):
         with self.assertRaises(ValidationError):
             VerifyRequest(

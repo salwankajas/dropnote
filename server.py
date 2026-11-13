@@ -20,9 +20,14 @@ from datetime import date
 from contextlib import closing
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
-from urllib.request import Request as UrlRequest, urlopen
-from urllib.error import HTTPError, URLError
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+import requests
 from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -30,13 +35,112 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from youtube_comment_downloader import YoutubeCommentDownloader, SORT_BY_RECENT
 
-DB_PATH = Path(os.environ.get("DROPNOTE_DB", "dropnote.sqlite3"))
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+USE_POSTGRES = bool(DATABASE_URL and DATABASE_URL.startswith(("postgres://", "postgresql://")))
+
+if USE_POSTGRES:
+    try:
+        import psycopg
+        from psycopg_pool import ConnectionPool
+        from psycopg.errors import IntegrityError as PgIntegrityError
+
+        class RowWrapper(dict):
+            def __getitem__(self, item):
+                if isinstance(item, int):
+                    return list(self.values())[item]
+                return super().__getitem__(item)
+
+        def make_row(cursor):
+            if not cursor.description:
+                return lambda values: values
+            fields = [c.name for c in cursor.description]
+            def row_factory(values):
+                return RowWrapper(zip(fields, values))
+            return row_factory
+
+        pg_pool = ConnectionPool(
+            conninfo=DATABASE_URL,
+            min_size=1,
+            max_size=10,
+            max_idle=300.0,
+            check=ConnectionPool.check_connection,
+            kwargs={"row_factory": make_row},
+        )
+
+        class PgConnectionWrapper:
+            def __init__(self, conn, pool):
+                self._conn = conn
+                self._pool = pool
+                self._closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                if exc_type is not None:
+                    self.rollback()
+                self.close()
+
+            def execute(self, sql: str, params=None):
+                clean_sql = sql.strip().upper()
+                if clean_sql.startswith("BEGIN"):
+                    return self
+                target_sql = sql.replace("?", "%s") if params is not None else sql
+                try:
+                    if params is not None:
+                        return self._conn.execute(target_sql, params)
+                    return self._conn.execute(target_sql)
+                except Exception as e:
+                    if "closed the connection" in str(e).lower() or getattr(self._conn, "broken", False) or getattr(self._conn, "closed", False):
+                        try:
+                            self._conn = self._pool.getconn()
+                            if params is not None:
+                                return self._conn.execute(target_sql, params)
+                            return self._conn.execute(target_sql)
+                        except Exception:
+                            raise e
+                    raise
+
+            def commit(self):
+                try:
+                    self._conn.commit()
+                except Exception:
+                    pass
+
+            def rollback(self):
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+
+            def close(self):
+                if not self._closed:
+                    try:
+                        if not self._conn.closed and not getattr(self._conn, "broken", False):
+                            self._conn.rollback()
+                    except Exception:
+                        pass
+                    try:
+                        self._pool.putconn(self._conn)
+                    except Exception:
+                        pass
+                    self._closed = True
+
+        IntegrityErrors = (sqlite3.IntegrityError, PgIntegrityError)
+    except Exception as _e:
+        USE_POSTGRES = False
+        IntegrityErrors = (sqlite3.IntegrityError,)
+else:
+    IntegrityErrors = (sqlite3.IntegrityError,)
+
+DEFAULT_DB_PATH = Path(os.environ.get("DROPNOTE_DB", "dropnote.sqlite3"))
+DB_PATH = DEFAULT_DB_PATH
 MAX_SCAN_COMMENTS = int(os.environ.get("MAX_SCAN_COMMENTS", "250"))
 COMMENT_CACHE_TTL = float(os.environ.get("COMMENT_CACHE_TTL", "15"))
 COMMENT_CACHE_MAX_VIDEOS = int(os.environ.get("COMMENT_CACHE_MAX_VIDEOS", "64"))
 VIDEO_INFO_CACHE_TTL = float(os.environ.get("VIDEO_INFO_CACHE_TTL", "600"))
 DB_TIMEOUT_SECONDS = 5.0
-CODE_RE = re.compile(r"^[a-z]{2,10}(?:[- ]+[a-z]{2,10}){2,}\.?$", re.IGNORECASE)
+CODE_RE = re.compile(r"^[a-z]{1,24}(?:[- ]+[a-z]{1,24}){2,}\.?$", re.IGNORECASE)
 
 app = FastAPI(title="Dropnote verification service", version="0.2.0")
 app.add_middleware(
@@ -62,7 +166,7 @@ async def cache_policy(request: Request, call_next):
     return response
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def frontend():
     index = DIST_PATH / "index.html"
     if not index.is_file():
@@ -71,6 +175,9 @@ def frontend():
 
 
 def db():
+    if USE_POSTGRES and DB_PATH == DEFAULT_DB_PATH:
+        conn = pg_pool.getconn()
+        return PgConnectionWrapper(conn, pg_pool)
     connection = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT_SECONDS)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 5000")
@@ -79,6 +186,75 @@ def db():
 
 
 def init_db():
+    if USE_POSTGRES and DB_PATH == DEFAULT_DB_PATH:
+        with closing(db()) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS claims (
+                    id SERIAL PRIMARY KEY,
+                    campaign_id TEXT NOT NULL,
+                    video_id TEXT NOT NULL,
+                    author_channel_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(video_id, author_channel_id)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS campaigns (
+                    campaign_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    handle TEXT NOT NULL DEFAULT '',
+                    category TEXT NOT NULL DEFAULT 'New resource',
+                    accent TEXT NOT NULL DEFAULT '#6558E8',
+                    claimed INTEGER NOT NULL DEFAULT 0,
+                    max_claims INTEGER,
+                    ends_at TEXT NOT NULL DEFAULT 'No end date',
+                    status TEXT NOT NULL DEFAULT 'Live',
+                    description TEXT NOT NULL DEFAULT 'A creator resource campaign.',
+                    resource_url TEXT NOT NULL,
+                    resource_type TEXT NOT NULL DEFAULT 'link',
+                    resource_text TEXT NOT NULL DEFAULT '',
+                    video_url TEXT NOT NULL,
+                    initials TEXT NOT NULL,
+                    creator_email TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS creators (
+                    email TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    invite_approved INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    email TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    expires_at DOUBLE PRECISION NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS creator_invites (
+                    invite_id TEXT PRIMARY KEY,
+                    code_hash TEXT NOT NULL UNIQUE,
+                    invited_email TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    expires_at DOUBLE PRECISION NOT NULL,
+                    used_at DOUBLE PRECISION,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("UPDATE campaigns SET claimed = (SELECT COUNT(*) FROM claims WHERE claims.campaign_id = campaigns.campaign_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_claims_campaign ON claims(campaign_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_creator ON campaigns(creator_email)")
+            conn.commit()
+        return
+
     with closing(db()) as conn:
         # WAL keeps reads (campaign pages, downloads) available while a claim is written.
         conn.execute("PRAGMA journal_mode = WAL")
@@ -331,7 +507,11 @@ def startup():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "verification": "youtube-comment-downloader"}
+    return {
+        "ok": True,
+        "database": "neon_postgres" if USE_POSTGRES else "sqlite",
+        "verification": "youtube-comment-downloader",
+    }
 
 
 SESSION_SECONDS = 60 * 60 * 24 * 7
@@ -448,7 +628,7 @@ def auth_signup(payload: SignupPayload, request: Request, response: Response):
                 raise HTTPException(403, "This invitation has already been used or expired.")
             conn.execute("DELETE FROM sessions WHERE email = ? AND role = 'creator'", (email,))
             conn.commit()
-        except sqlite3.IntegrityError as exc:
+        except IntegrityErrors as exc:
             conn.rollback()
             raise HTTPException(409, "An account with this email already exists. Sign in instead.") from exc
     set_login_cookie(response, request, email, "creator")
@@ -554,15 +734,15 @@ def youtube_video_info(payload: VideoInfoRequest, user=Depends(require_user)):
     if cached is not None:
         return cached
     oembed_url = f"https://www.youtube.com/oembed?url={quote(f'https://www.youtube.com/watch?v={video_id}', safe='')}&format=json"
-    request = UrlRequest(oembed_url, headers={"User-Agent": "Dropnote/1.0 (+video metadata preview)"})
     try:
-        with urlopen(request, timeout=10) as response:
-            info = json.load(response)
-    except HTTPError as exc:
-        if exc.code in (400, 401, 403, 404):
-            raise HTTPException(422, "YouTube could not find public video details for that link.") from exc
-        raise HTTPException(502, "YouTube video details are temporarily unavailable.") from exc
-    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        response = requests.get(oembed_url, headers={"User-Agent": "Dropnote/1.0 (+video metadata preview)"}, timeout=15)
+        if response.status_code in (400, 401, 403, 404):
+            raise HTTPException(422, "YouTube could not find public video details for that link.")
+        response.raise_for_status()
+        info = response.json()
+    except HTTPException:
+        raise
+    except (requests.RequestException, ValueError) as exc:
         raise HTTPException(502, "Could not fetch YouTube details right now. Check the video link and try again.") from exc
     author_url = info.get("author_url", "")
     handle = urlparse(author_url).path.rsplit("/", 1)[-1] if author_url else ""
@@ -589,7 +769,7 @@ def create_campaign(payload: CampaignCreate, user=Depends(require_user)):
                 VALUES(?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?)
             """, (payload.id,payload.title,payload.channel,payload.handle,payload.category,payload.accent,payload.limit,payload.ends,payload.status,payload.description,payload.resource if payload.resourceType == "link" else "",payload.resourceType,payload.resource if payload.resourceType == "text" else "",payload.video,payload.initials,user["email"]))
             conn.commit()
-        except sqlite3.IntegrityError as exc:
+        except IntegrityErrors as exc:
             conn.rollback()
             raise HTTPException(409, "That campaign ID already exists.") from exc
     return {"ok": True, "campaignId": payload.id}
@@ -643,6 +823,51 @@ def delete_campaign(campaign_id: str, user=Depends(require_user)):
         conn.execute("DELETE FROM campaigns WHERE campaign_id = ?", (campaign_id,))
         conn.commit()
     return {"ok": True, "campaignId": campaign_id}
+
+
+class BatchStatusPayload(BaseModel):
+    campaign_ids: list[str] = Field(default_factory=list)
+    status: str = Field(pattern=r"^(Live|Paused)$")
+
+
+class BatchDeletePayload(BaseModel):
+    campaign_ids: list[str] = Field(min_length=1)
+
+
+@app.post("/api/studio/campaigns/batch-status")
+def batch_update_campaign_status(payload: BatchStatusPayload, user=Depends(require_user)):
+    with closing(db()) as conn:
+        if not payload.campaign_ids:
+            if user["role"] == "admin":
+                conn.execute("UPDATE campaigns SET status = ?", (payload.status,))
+            else:
+                conn.execute("UPDATE campaigns SET status = ? WHERE creator_email = ?", (payload.status, user["email"]))
+        else:
+            placeholders = ",".join("?" for _ in payload.campaign_ids)
+            if user["role"] == "admin":
+                conn.execute(f"UPDATE campaigns SET status = ? WHERE campaign_id IN ({placeholders})", (payload.status, *payload.campaign_ids))
+            else:
+                conn.execute(f"UPDATE campaigns SET status = ? WHERE creator_email = ? AND campaign_id IN ({placeholders})", (payload.status, user["email"], *payload.campaign_ids))
+        conn.commit()
+    return {"ok": True, "status": payload.status}
+
+
+@app.post("/api/studio/campaigns/batch-delete")
+def batch_delete_campaigns(payload: BatchDeletePayload, user=Depends(require_user)):
+    with closing(db()) as conn:
+        placeholders = ",".join("?" for _ in payload.campaign_ids)
+        if user["role"] == "admin":
+            conn.execute(f"DELETE FROM claims WHERE campaign_id IN ({placeholders})", (*payload.campaign_ids,))
+            conn.execute(f"DELETE FROM campaigns WHERE campaign_id IN ({placeholders})", (*payload.campaign_ids,))
+        else:
+            owned_rows = conn.execute(f"SELECT campaign_id FROM campaigns WHERE creator_email = ? AND campaign_id IN ({placeholders})", (user["email"], *payload.campaign_ids)).fetchall()
+            owned_ids = [r["campaign_id"] for r in owned_rows]
+            if owned_ids:
+                owned_placeholders = ",".join("?" for _ in owned_ids)
+                conn.execute(f"DELETE FROM claims WHERE campaign_id IN ({owned_placeholders})", (*owned_ids,))
+                conn.execute(f"DELETE FROM campaigns WHERE campaign_id IN ({owned_placeholders})", (*owned_ids,))
+        conn.commit()
+    return {"ok": True, "deleted": len(payload.campaign_ids)}
 
 
 @app.post("/api/verify")
@@ -716,7 +941,7 @@ def verify_comment(payload: VerifyRequest):
                 conn.execute("UPDATE campaigns SET claimed = claimed + 1 WHERE campaign_id = ?", (payload.campaignId,))
                 already_claimed = False
             conn.commit()
-    except sqlite3.IntegrityError as exc:
+    except IntegrityErrors as exc:
         raise HTTPException(409, "This YouTube account has already claimed a drop for this video.") from exc
 
     return {
@@ -742,3 +967,13 @@ def campaign_claims(campaign_id: str, user=Depends(require_user)):
             raise HTTPException(403, "You do not have access to this campaign.")
         count = conn.execute("SELECT COUNT(*) AS n FROM claims WHERE campaign_id = ?", (campaign_id,)).fetchone()["n"]
     return {"campaignId": campaign_id, "verifiedClaims": count}
+
+
+@app.api_route("/{full_path:path}", methods=["GET", "HEAD"])
+def spa_fallback(full_path: str):
+    if full_path.startswith("api/"):
+        raise HTTPException(404, "Not found")
+    index = DIST_PATH / "index.html"
+    if not index.is_file():
+        raise HTTPException(503, "Frontend build is missing. Run npm run build first.")
+    return FileResponse(index)

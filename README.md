@@ -8,10 +8,12 @@ Dropnote is an open-source prototype for creator campaigns that unlock a resourc
 
 - Responsive React and Material UI interface with light, dark, and system themes.
 - Creator Studio with campaign creation, editing, pause/resume, deletion, and campaign-specific share links.
+- Bulk campaign management: easily pause all, resume all, or select multiple campaigns to pause, resume, or delete.
 - Link or plain-text resources. The link or text is returned only after comment verification and is revealed in the viewer's browser; nothing is uploaded or stored as a file.
 - Viewer-written comments with a generated claim sentence appended only when the viewer copies the comment.
-- Invite-only creator accounts. The admin creates email-bound, single-use invitation links; email delivery is not built in, so links are shared manually.
-- SQLite persistence for local accounts, sessions, campaigns, and claims.
+- Private, zero-email claiming flow where unlocked resources live securely in the browser's session storage.
+- Flexible database persistence supporting both local SQLite and cloud PostgreSQL (e.g. Neon Serverless Postgres) with connection pooling.
+- Strong password security using PBKDF2-HMAC-SHA256 with 310,000 rounds and random per-user salts.
 
 ## Requirements
 
@@ -68,16 +70,17 @@ npm run dev
 
 Open the Vite URL printed in the second terminal (normally `http://localhost:5173`). Vite proxies `/api` requests to the API on port 8000. FastAPI's interactive API documentation is at `http://localhost:8000/docs`.
 
-Sign in to **Studio** with the environment-configured admin credentials. Use **Invite creator** to generate an email-bound link, then share that link privately with the intended person. There is no public creator signup.
+Sign in to **Studio** with the environment-configured admin credentials to create, manage, and monitor your campaigns.
 
 ## Configuration
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
+| `DATABASE_URL` | PostgreSQL connection string (e.g. Neon Serverless Postgres); enables PostgreSQL persistence and connection pooling | Unset; falls back to SQLite |
 | `DROPNOTE_ADMIN_EMAIL` | Environment-configured administrator email | Unset; admin login unavailable |
 | `DROPNOTE_ADMIN_PASSWORD` | Environment-configured administrator password | Unset; admin login unavailable |
 | `DROPNOTE_COOKIE_SECURE` | Force Secure session cookies (`true` in HTTPS deployments) | Automatically inferred from request/proxy |
-| `DROPNOTE_DB` | SQLite database file | `dropnote.sqlite3` in the working directory |
+| `DROPNOTE_DB` | SQLite database file (used when `DATABASE_URL` is unset) | `dropnote.sqlite3` in the working directory |
 | `MAX_SCAN_COMMENTS` | Maximum recent comments examined during a check | `250` |
 | `COMMENT_CACHE_TTL` | Seconds a scraped comment page is reused; concurrent checks share one scrape | `15` |
 | `COMMENT_CACHE_MAX_VIDEOS` | Maximum videos kept in the comment cache | `64` |
@@ -127,7 +130,58 @@ docker run --rm -p 10000:10000 \
   dropnote
 ```
 
-The included `render.yaml` is a convenience for a **temporary test deployment**. Free/ephemeral hosts can sleep and may discard the local database. Do not rely on such a deployment for durable user accounts, campaigns, or claims; use a persistent disk or a managed database before hosting real users.
+## Free deployment (Render + Neon PostgreSQL)
+
+You can deploy Dropnote completely for free using **[Render](https://render.com)** for web hosting and **[Neon](https://neon.tech)** for serverless PostgreSQL. This combination provides zero-cost hosting with durable cloud database persistence across server restarts and new builds.
+
+### Step 1: Create a free PostgreSQL database on Neon
+
+1. Sign up for a free account at [neon.tech](https://neon.tech).
+2. Click **Create Project** and name it (for example, `dropnote`).
+3. Neon will display your **Connection Details**.
+4. Copy the connection string (format: `postgresql://<user>:<password>@<endpoint>.neon.tech/neondb?sslmode=require`).
+   * Dropnote connects directly using this URL and manages connection pooling with `psycopg_pool`.
+
+### Step 2: Deploy to Render for free
+
+You can deploy using either the **Render Blueprint** (automatic) or **Manual Web Service Setup**:
+
+#### Option A: One-click Blueprint Deploy (Recommended)
+1. Fork or push this repository to your GitHub account.
+2. Sign in to your [Render Dashboard](https://dashboard.render.com).
+3. Click **New +** and select **Blueprint**.
+4. Connect your GitHub repository. Render automatically reads the included `render.yaml` configuration.
+5. In the environment variables prompt, enter:
+   * `DATABASE_URL`: Your Neon PostgreSQL connection string.
+   * `DROPNOTE_ADMIN_EMAIL`: Your administrator email (for example, `admin@yourdomain.com`).
+   * `DROPNOTE_ADMIN_PASSWORD`: A secure password for Studio administrator access.
+6. Click **Apply**. Render will build the Docker container and start your service on the Free plan.
+
+#### Option B: Manual Web Service Setup
+1. Sign in to your [Render Dashboard](https://dashboard.render.com).
+2. Click **New +** and select **Web Service**.
+3. Connect your GitHub repository.
+4. Configure the service settings:
+   * **Name**: `dropnote` (or your preferred name)
+   * **Runtime**: `Docker` (Render automatically uses the included multi-stage `Dockerfile`)
+   * **Instance Type**: `Free`
+5. Under **Environment Variables**, add:
+   * `DATABASE_URL`: Your Neon PostgreSQL connection string (`postgresql://...`).
+   * `DROPNOTE_ADMIN_EMAIL`: Your administrator email.
+   * `DROPNOTE_ADMIN_PASSWORD`: A secure administrator password.
+   * `DROPNOTE_COOKIE_SECURE`: `true` (Render provides free automatic HTTPS).
+   * `PORT`: `10000` (Render default).
+6. Click **Create Web Service**.
+
+### Step 3: Verify and access your deployment
+
+1. Render compiles the Vite frontend (`npm run build`) and packages it into the Python container.
+2. On initial startup, Dropnote automatically creates the required PostgreSQL schema (`campaigns`, `claims`, `creators`, `creator_invites`, and `sessions`) in your Neon database.
+3. Once the build status displays `Live`, open your Render URL (for example, `https://dropnote.onrender.com`).
+4. Navigate to `/studio` to sign in with your configured admin email and password.
+5. You can now manage campaigns, pause or resume drops in bulk, and invite other creators!
+
+> **Free Tier Spin-Down:** Free Render web services spin down after 15 minutes of inactivity. When a new visitor opens the link, Render wakes up the service in approximately 30–50 seconds. Because your database is hosted on Neon, all campaigns, claims, and creator accounts remain completely safe and persistent.
 
 ## GitHub publishing checklist
 
@@ -155,8 +209,8 @@ If this folder is already a Git repository, inspect `git status` and remotes bef
 - `youtube-comment-downloader` scrapes public YouTube web responses rather than using a stable supported YouTube API. YouTube can change or block it; verification can fail, be rate-limited, or miss comments outside the scan window. Review its license and YouTube's terms and policies before deployment.
 - The “comment to unlock” mechanic may conflict with YouTube fake-engagement rules. Review current platform policies and obtain qualified advice before public use.
 - Email ownership is not independently verified during creator signup. A private invitation link is bound to an email string, but the prototype does not prove the registrant controls that inbox.
-- There is no email sending, account recovery, CAPTCHA, or distributed login/signup rate limiting. The optional recovery email field is display-only and is not sent to or saved by the backend.
-- SQLite is suitable only for local use or temporary demos. Configure durable storage, backups, retention controls, and appropriate access controls before using real user data.
+- There is no viewer email collection, tracking, or account registration required. The claim and unlock flow is completely private and runs client-side in session storage.
+- When running with SQLite, persistence is suitable only for local use or temporary demos. For durable production storage across deployments, use a managed PostgreSQL database such as Neon (documented in the Free Deployment section above).
 - A YouTube channel ID identifies an account/channel, not a unique human; one person can use multiple YouTube accounts.
 
 ## License

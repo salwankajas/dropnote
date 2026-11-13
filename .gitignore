@@ -2,6 +2,12 @@
 .env
 .env.*
 !.env.example
+.ssh/
+.config/
+.claude/
+uploads/
+name.txt
+neon.ts
 
 # Dependencies and generated frontend output
 node_modules/
@@ -46,3 +52,4 @@ edgeone-*/
 .sudo_as_admin_successful
 .DS_Store
 Thumbs.db
+.neon
